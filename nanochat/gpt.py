@@ -38,7 +38,14 @@ class GPTConfig:
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
-    window_pattern: str = "SSSL"
+    window_pattern: str = "L"
+
+    # Looped Transformer config options
+    n_prelude: int = 2
+    n_recur_block: int = 4
+    n_coda: int = 2
+    # -> Inference
+    n_loops: int = 4  # number of times to run the recurrent block during inference
 
 
 def norm(x):
@@ -75,12 +82,12 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.ve_gate_channels = 32
-        self.ve_gate = (
-            nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
-            if has_ve(layer_idx, config.n_layer)
-            else None
-        )
+        # self.ve_gate_channels = 32
+        # self.ve_gate = (
+        #    nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False)
+        #    if has_ve(layer_idx, config.n_layer)
+        #    else None
+        # )
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
         B, T, C = x.size()
@@ -160,7 +167,7 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    def __init__(self, config, pad_vocab_size_to=64):
+    def __init__(self, config: GPTConfig, pad_vocab_size_to: int = 64):
         """
         NOTE a major footgun: this __init__ function runs in meta device context (!!)
         Therefore, any calculations inside here are shapes and dtypes only, no actual data.
@@ -168,6 +175,11 @@ class GPT(nn.Module):
         """
         super().__init__()
         self.config = config
+        # Validate looped Transformer config
+        assert config.n_layer == (
+            config.n_prelude + config.n_recur_block + config.n_coda
+        ), "n_layer must equal n_prelude + n_recur_block + n_coda"
+
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
         self.window_sizes = self._compute_window_sizes(config)
@@ -183,23 +195,26 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(padded_vocab_size, config.n_embd),
-                "h": nn.ModuleList(
-                    [Block(config, layer_idx) for layer_idx in range(config.n_layer)]
+                "prelude": nn.ModuleList(
+                    [Block(config, layer_idx) for layer_idx in range(config.n_prelude)]
+                ),
+                "recur": nn.ModuleList(
+                    [
+                        Block(config, layer_idx)
+                        for layer_idx in range(config.n_recur_block)
+                    ]
+                ),
+                "coda": nn.ModuleList(
+                    [Block(config, layer_idx) for layer_idx in range(config.n_coda)]
                 ),
             }
         )
+        # Input injection adapter
+        self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
         self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
-        # Per-layer learnable scalars (inspired by modded-nanogpt)
-        # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
-        # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
-        # Separate parameters so they can have different optimizer treatment
-        self.resid_lambdas = nn.Parameter(
-            torch.ones(config.n_layer)
-        )  # fake init, real init in init_weights()
-        self.x0_lambdas = nn.Parameter(
-            torch.zeros(config.n_layer)
-        )  # fake init, real init in init_weights()
+        # NOTE: Removed Per-layer learnable scalars (inspired by modded-nanogpt)
         # Value embeddings (ResFormer-style): alternating layers, last layer always included
+        # NOTE: Disabled for now
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
         self.value_embeds = nn.ModuleDict(
@@ -248,7 +263,11 @@ class GPT(nn.Module):
         s = (
             3**0.5 * n_embd**-0.5
         )  # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
-        for block in self.transformer.h:
+        for block in (
+            list(self.transformer.prelude)
+            + list(self.transformer.recur)
+            + list(self.transformer.coda)
+        ):
             torch.nn.init.uniform_(
                 block.attn.c_q.weight, -s, s
             )  # weights use Uniform to avoid outliers
@@ -258,19 +277,27 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
-        # Per-layer scalars
-        self.resid_lambdas.fill_(1.0)  # 1.0 => typical residual connections at init
-        self.x0_lambdas.fill_(
-            0.0
-        )  # 0.0 => skip connection to input is disabled at init
+        # Initialize inject layer as identity-like: output = e (first half of concat(e, s))
+        # This ensures gradients flow on the first forward pass
+        # Weight shape is (n_embd, 2*n_embd), we want [I | 0] so inject(concat(e,s)) ≈ e
+        n_embd = self.config.n_embd
+        with torch.no_grad():
+            self.inject.weight.zero_()
+            self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
 
         # Value embeddings (init like c_v: uniform with same std)
         for ve in self.value_embeds.values():
+            raise NotImplementedError("Value Embeddings are disabled for now.")
             torch.nn.init.uniform_(ve.weight, -s, s)
 
         # Gate weights init to zero so gates start at sigmoid(0) = 0.5, scaled by 2 -> 1.0 (neutral)
-        for block in self.transformer.h:
+        for block in (
+            list(self.transformer.prelude)
+            + list(self.transformer.recur)
+            + list(self.transformer.coda)
+        ):
             if block.attn.ve_gate is not None:
+                raise NotImplementedError("Value Embeddings are disabled for now.")
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
 
         # Rotary embeddings
@@ -282,6 +309,7 @@ class GPT(nn.Module):
         if self.transformer.wte.weight.device.type == "cuda":
             self.transformer.wte.to(dtype=torch.bfloat16)
             for ve in self.value_embeds.values():
+                raise NotImplementedError("Value Embeddings are disabled for now.")
                 ve.to(dtype=torch.bfloat16)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
@@ -392,22 +420,22 @@ class GPT(nn.Module):
         matrix_lr=0.02,
         weight_decay=0.0,
         adam_betas=(0.8, 0.95),
-        scalar_lr=0.5,
     ):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into groups
-        matrix_params = list(self.transformer.h.parameters())
+        matrix_params = (
+            list(self.transformer.prelude.parameters())
+            + list(self.transformer.recur.parameters())
+            + list(self.transformer.coda.parameters())
+            + list(self.inject.parameters())
+        )
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        resid_params = [self.resid_lambdas]
-        x0_params = [self.x0_lambdas]
         assert len(list(self.parameters())) == len(matrix_params) + len(
             embedding_params
-        ) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(
-            x0_params
-        )
+        ) + len(lm_head_params) + len(value_embeds_params)
         # Create the AdamW optimizer for the embedding, lm_head, and per-layer scalars
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -420,10 +448,6 @@ class GPT(nn.Module):
             dict(
                 params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale
             ),  # same LR as token embedding
-            dict(
-                params=resid_params, lr=scalar_lr * 0.01
-            ),  # these are a lot more sensitive because they accumulate in the residual stream
-            dict(params=x0_params, lr=scalar_lr),
         ]
         adamw_kwargs = dict(
             betas=adam_betas, eps=1e-10, weight_decay=0.0
@@ -441,8 +465,12 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction="mean"):
+    def forward(
+        self, idx, targets=None, kv_cache=None, loss_reduction="mean", n_loops=None
+    ):
         B, T = idx.size()
+        if n_loops is None:
+            n_loops = self.config.n_loops
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert T <= self.cos.size(1), (
@@ -459,14 +487,39 @@ class GPT(nn.Module):
             self.sin[:, T0 : T0 + T],
         )  # truncate cache to current sequence length
 
-        # Forward the trunk of the Transformer
+        # 1. Embedding + norm
         x = self.transformer.wte(idx)
         x = norm(x)
-        x0 = x  # save initial normalized embedding for x0 residual
-        for i, block in enumerate(self.transformer.h):
-            x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
-            ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
+
+        # 2. Prelude blocks (run once)
+        # For inference with KV cache, prelude uses cache_write=True
+        ve = None
+        for block in self.transformer.prelude:
+            x = block(x, ve, cos_sin, kv_cache)
+        e = x  # prelude output, used for injection into each recurrence
+
+        # 3. Initialize recurrent state
+        s = e  # initial state is prelude output
+
+        # 4. Recurrent block (run num_recur times)
+        for i in range(n_loops):
+            # Input injection: u = inject(concat(e, s))
+            u = self.inject(torch.cat([e, s], dim=-1))
+            s = u  # update recurrent state
+            # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
+            for block in self.transformer.recur:
+                u = block(u, ve, cos_sin, kv_cache)
+            # TODO: No normalization? u = norm(u)?
+            s = u  # update recurrent state
+            # Truncated BPTT: detach gradients for recurrences before the last bptt_k
+            # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
+            if self.config.bptt_k is not None and i < n_loops - self.config.bptt_k:
+                s = s.detach()
+
+        # 5. Coda blocks (run once)
+        x = s
+        for block in self.transformer.coda:
+            x = block(x, ve, cos_sin, kv_cache)
         x = norm(x)
 
         # Forward the lm_head (compute logits)
@@ -493,7 +546,9 @@ class GPT(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
+    def generate(
+        self, tokens, max_tokens, temperature=1.0, top_k=None, seed=4, num_loops=None
+    ):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
@@ -508,7 +563,7 @@ class GPT(nn.Module):
             rng.manual_seed(seed)
         ids = torch.tensor([tokens], dtype=torch.long, device=device)  # add batch dim
         for _ in range(max_tokens):
-            logits = self.forward(ids)  # (B, T, vocab_size)
+            logits = self.forward(ids, num_loops=num_loops)  # (B, T, vocab_size)
             logits = logits[:, -1, :]  # (B, vocab_size)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
