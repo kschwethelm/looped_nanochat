@@ -10,28 +10,38 @@ Notable features:
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
 - Flash Attention 3 integration
+
+Looped Transformer specifics:
+- Three-stage architecture: prelude (n_prelude layers) → recur (n_recur_block layers, run num_recur times) → coda (n_coda layers)
+- KV cache persists across all recurrences, allowing each recurrence to attend to previous tokens
+- Input injection at each recurrence: u = inject(concat(e, s)) where e=prelude output, s=recurrent state
+  - inject layer initialized as identity-like [I|0] so inject(concat(e,s)) ≈ e initially
+- Warm-start inference: final recurrent state s from token t-1 initializes state for token t (disabled for training)
+- Truncated BPTT: gradients detached for all but last bptt_k recurrences to limit memory/compute
+- Variable recurrence depth: num_recur sampled from distribution during training (mean=train_recur_mean, max=train_recur_max)
+- Recurrent state flow: s ← e (init) → s ← recur(inject(e,s)) (loop num_recur times) → coda(s) → output
 """
 
-from functools import partial
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.common import get_dist_info, print0
-from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
+from nanochat.common import get_dist_info, print0
 
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
+from nanochat.muon import DistMuon, Muon
 
 
 @dataclass
 class GPTConfig:
     sequence_len: int = 2048
     vocab_size: int = 65536
-    n_layer: int = 20
+    n_layer: int = 20  # Here only used for scaling, not the actual number of layers
     n_head: int = 10  # number of query heads
     n_kv_head: int = 10  # number of key/value heads (GQA)
     n_embd: int = 1280
@@ -46,16 +56,12 @@ class GPTConfig:
     n_coda: int = 2
 
     # Looped Transformer traning options
-    train_recur_mean: float = (
-        4.0  # mean recurrences during training (samples from distribution)
-    )
+    train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
-    recur_warm_start: bool = (
-        True  # warm-start recurrence from previous token's final state
+    recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
+    bptt_k: int = (
+        4  # truncate backprop to last k recurrences (you have this in code but not config)
     )
-    bptt_k: int = 4  # truncate backprop to last k recurrences (you have this in code but not config)
-    kv_cache_recur_budget: int = 1  # KV cache slots per position for recurrence
-    inject_mode: str = "concat_linear"  # input injection mode
 
 
 def norm(x):
@@ -105,9 +111,7 @@ class CausalSelfAttention(nn.Module):
         # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
         if kv_cache is None:
             # Training: causal attention with optional sliding window
-            y = flash_attn.flash_attn_func(
-                q, k, v, causal=True, window_size=window_size
-            )
+            y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
             # Inference: use flash_attn_with_kvcache which handles cache management
             k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
@@ -166,9 +170,9 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         # Validate looped Transformer config
-        assert config.n_layer == (
-            config.n_prelude + config.n_recur_block + config.n_coda
-        ), "n_layer must equal n_prelude + n_recur_block + n_coda"
+        assert config.n_layer >= (config.n_prelude + config.n_recur_block + config.n_coda), (
+            "n_layer must be bigger or equal than n_prelude + n_recur_block + n_coda"
+        )
 
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
@@ -190,12 +194,15 @@ class GPT(nn.Module):
                 ),
                 "recur": nn.ModuleList(
                     [
-                        Block(config, layer_idx)
+                        Block(config, config.n_prelude + layer_idx)
                         for layer_idx in range(config.n_recur_block)
                     ]
                 ),
                 "coda": nn.ModuleList(
-                    [Block(config, layer_idx) for layer_idx in range(config.n_coda)]
+                    [
+                        Block(config, config.n_prelude + config.n_recur_block + layer_idx)
+                        for layer_idx in range(config.n_coda)
+                    ]
                 ),
             }
         )
@@ -292,7 +299,7 @@ class GPT(nn.Module):
         )  # add batch and head dims for later broadcasting
         return cos, sin
 
-    def _compute_window_sizes(self, config):
+    def _compute_window_sizes(self, config: GPTConfig):
         """
         Compute per-layer window sizes for sliding window attention.
 
@@ -316,7 +323,7 @@ class GPT(nn.Module):
         }
         # Tile pattern across layers
         window_sizes = []
-        for layer_idx in range(config.n_layer):
+        for layer_idx in range(config.n_prelude + config.n_recur_block + config.n_coda):
             char = pattern[layer_idx % len(pattern)]
             window_sizes.append(char_to_window[char])
         # Final layer always gets full context
@@ -326,9 +333,10 @@ class GPT(nn.Module):
     def get_device(self):
         return self.transformer.wte.weight.device
 
-    def estimate_flops(self):
+    def estimate_flops(self, num_recur=None):
         """
-        Return the estimated FLOPs per token for the model (forward + backward).
+        Return the estimated FLOPs per token for the looped model (forward + backward).
+
         Each matmul weight parameter contributes 2 FLOPs (multiply *, accumulate +) in forward, and 2X that in backward => 2+4=6.
         Cleanest explanation of this: https://medium.com/@dzmitrybahdanau/the-flops-calculus-of-language-model-training-3b19c1f025e4
         On top of that, 12 * h * q * effective_seq_len accounts for key @ query matmul flops inside attention.
@@ -337,22 +345,53 @@ class GPT(nn.Module):
         This is ~1% off from the exact formulas of Chinchilla paper, the difference is:
         - Chinchilla counts the embedding layer as flops (? weird, it's just a lookup => we ignore)
         - Chinchilla counts exp/sum/divide in attention softmax as flops (a little sus and very tiny => we ignore)
+
+        Args:
+            num_recur: Number of recurrences to assume. If None, uses train_recur_mean.
         """
-        nparams = sum(p.numel() for p in self.parameters())
-        # Exclude non-matmul params: embeddings
-        nparams_exclude = self.transformer.wte.weight.numel()
+        if num_recur is None:
+            num_recur = int(self.config.train_recur_mean)
+
         h, q, t = (
             self.config.n_head,
             self.config.n_embd // self.config.n_head,
             self.config.sequence_len,
         )
-        # Sum attention FLOPs per layer, accounting for sliding window
+
+        # 1. Count parameters by section
+        prelude_params = sum(p.numel() for p in self.transformer.prelude.parameters())
+        recur_params = sum(p.numel() for p in self.transformer.recur.parameters())
+        coda_params = sum(p.numel() for p in self.transformer.coda.parameters())
+        inject_params = sum(p.numel() for p in self.inject.parameters())
+        lm_head_params = sum(p.numel() for p in self.lm_head.parameters())
+
+        # 2. Matmul FLOPs weighted by usage
+        matmul_flops = 6 * (
+            prelude_params  # prelude runs 1x
+            + recur_params * num_recur  # recur runs num_recur times
+            + coda_params  # coda runs 1x
+            + inject_params * num_recur  # inject runs num_recur times
+            + lm_head_params  # lm_head runs 1x
+        )
+
+        # 3. Attention FLOPs weighted by usage
         attn_flops = 0
-        for window_size in self.window_sizes:
-            window = window_size[0]  # (left, right) tuple, we use left
+        num_layers = self.config.n_prelude + self.config.n_recur_block + self.config.n_coda
+        for layer_idx in range(num_layers):
+            window = self.window_sizes[layer_idx][0]
             effective_seq = t if window < 0 else min(window, t)
-            attn_flops += 12 * h * q * effective_seq
-        num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
+
+            # Determine how many times this layer runs
+            if layer_idx < self.config.n_prelude:
+                multiplier = 1  # prelude
+            elif layer_idx < self.config.n_prelude + self.config.n_recur_block:
+                multiplier = num_recur  # recur
+            else:
+                multiplier = 1  # coda
+
+            attn_flops += 12 * h * q * effective_seq * multiplier
+
+        num_flops_per_token = matmul_flops + attn_flops
         return num_flops_per_token
 
     def num_scaling_params(self):
@@ -386,9 +425,9 @@ class GPT(nn.Module):
         )
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(
-            embedding_params
-        ) + len(lm_head_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(
+            lm_head_params
+        )
         # Create the AdamW optimizer for the embedding, lm_head, and per-layer scalars
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -416,14 +455,20 @@ class GPT(nn.Module):
         return optimizers
 
     def forward(
-        self, idx, targets=None, kv_cache=None, loss_reduction="mean", n_loops=None
+        self,
+        idx,
+        targets=None,
+        kv_cache=None,
+        loss_reduction="mean",
+        num_recur=None,
+        warm_start_state=None,
     ):
         B, T = idx.size()
-        if n_loops is None:
-            n_loops = self.config.n_loops
+        if num_recur is None:
+            num_recur = int(self.config.train_recur_mean)
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
-        assert T <= self.cos.size(1), (
+        assert self.cos.size(1) >= T, (
             f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         )
         assert idx.device == self.cos.device, (
@@ -448,13 +493,20 @@ class GPT(nn.Module):
         e = x  # prelude output, used for injection into each recurrence
 
         # 3. Initialize recurrent state
-        s = e  # initial state is prelude output
+        # If warm_start_state provided and config allows, use it; otherwise start from e
+        if warm_start_state is not None and self.config.recur_warm_start:
+            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
+            if warm_start_state.size(1) != T:
+                s = warm_start_state.expand(-1, T, -1)
+            else:
+                s = warm_start_state
+        else:
+            s = e
 
         # 4. Recurrent block (run num_recur times)
-        for i in range(n_loops):
+        for i in range(num_recur):
             # Input injection: u = inject(concat(e, s))
             u = self.inject(torch.cat([e, s], dim=-1))
-            s = u  # update recurrent state
             # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
             for j, block in enumerate(self.transformer.recur):
                 u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache)
@@ -462,13 +514,18 @@ class GPT(nn.Module):
             s = u  # update recurrent state
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
             # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
-            if self.config.bptt_k is not None and i < n_loops - self.config.bptt_k:
+            if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
 
         # 5. Coda blocks (run once)
         x = s
         for i, block in enumerate(self.transformer.coda):
-            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache)
+            x = block(
+                x,
+                cos_sin,
+                self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i],
+                kv_cache,
+            )
         x = norm(x)
 
         # Forward the lm_head (compute logits)
@@ -482,7 +539,6 @@ class GPT(nn.Module):
 
         if targets is not None:
             # training: given the targets, compute and return the loss
-            # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),
@@ -491,13 +547,10 @@ class GPT(nn.Module):
             )
             return loss
         else:
-            # inference: just return the logits directly
-            return logits
+            return logits, s  # Return logits and final state
 
     @torch.inference_mode()
-    def generate(
-        self, tokens, max_tokens, temperature=1.0, top_k=None, seed=4, num_loops=None
-    ):
+    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, num_recur=None):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
@@ -511,8 +564,13 @@ class GPT(nn.Module):
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
         ids = torch.tensor([tokens], dtype=torch.long, device=device)  # add batch dim
+        warm_start_state = None
         for _ in range(max_tokens):
-            logits = self.forward(ids, num_loops=num_loops)  # (B, T, vocab_size)
+            logits, warm_start_state = self.forward(
+                ids, num_recur=num_recur, warm_start_state=warm_start_state
+            )  # (B, T, vocab_size)
+            # Only keep last position's state for warm-start (shape B,1,h)
+            warm_start_state = warm_start_state[:, -1:, :]
             logits = logits[:, -1, :]  # (B, vocab_size)
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))

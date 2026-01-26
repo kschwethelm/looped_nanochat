@@ -21,11 +21,12 @@ now attend back to the BOS token and sees the full context of the document.
 Fallback to (1) if you have very limited data AND long documents.
 """
 
-import torch
 import pyarrow.parquet as pq
+import torch
 
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
+
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
@@ -66,16 +67,25 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
                 rg_idx = ddp_rank
             while rg_idx < pf.num_row_groups:
                 rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
+                batch = rg.column("text").to_pylist()
                 for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch)
+                    yield batch[i : i + tokenizer_batch_size], (pq_idx, rg_idx, epoch)
                 rg_idx += ddp_world_size
             pq_idx += 1
         first_pass = False
         epoch += 1
 
 
-def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+def tokenizing_distributed_data_loader_with_state(
+    tokenizer,
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
+):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -93,15 +103,20 @@ def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokeni
     pq_idx, rg_idx, epoch = 0, 0, 1
 
     while True:
-
         # Accumulate enough tokens
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
-            token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+            token_lists = tokenizer.encode(
+                doc_batch, prepend=bos_token, num_threads=tokenizer_threads
+            )
             for tokens in token_lists:
                 token_buffer.extend(tokens)
-        tokens = token_buffer[:needed_tokens] # Read B*T+1 tokens (+1 is only for the target for the last token)
-        token_buffer = token_buffer[B*T:] # Advance by B*T tokens, so we move exactly one window of B*T tokens over
+        tokens = token_buffer[
+            :needed_tokens
+        ]  # Read B*T+1 tokens (+1 is only for the target for the last token)
+        token_buffer = token_buffer[
+            B * T :
+        ]  # Advance by B*T tokens, so we move exactly one window of B*T tokens over
 
         # Package tokens into inputs and targets, yield
         use_cuda = device == "cuda"
@@ -113,15 +128,22 @@ def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokeni
 
 def tokenizing_distributed_data_loader(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
+    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(
+        *args, **kwargs
+    ):
         yield inputs, targets
 
 
 def tokenizing_distributed_data_loader_with_state_bos_bestfit(
-    tokenizer, B, T, split,
-    tokenizer_threads=4, tokenizer_batch_size=128,
-    device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    tokenizer,
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
+    buffer_size=1000,
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -195,5 +217,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
 
 def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
+    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(
+        *args, **kwargs
+    ):
         yield inputs, targets

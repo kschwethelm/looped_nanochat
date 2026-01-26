@@ -1,36 +1,49 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
 """
-import os
-import re
+
 import glob
 import json
 import logging
+import os
+import re
+
 import torch
 
-from nanochat.common import get_base_dir
+from nanochat.common import get_base_dir, setup_default_logging
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
-from nanochat.common import setup_default_logging
 
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
+
+
 def log0(message):
-    if int(os.environ.get('RANK', 0)) == 0:
+    if int(os.environ.get("RANK", 0)) == 0:
         logger.info(message)
+
 
 def _patch_missing_config_keys(model_config_kwargs):
     """Add default values for new config keys missing in old checkpoints."""
     # Old models were trained with full context (no sliding window)
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
-        log0(f"Patching missing window_pattern in model config to 'L'")
+        log0("Patching missing window_pattern in model config to 'L'")
+
+    # Remove deprecated config keys
+    deprecated_keys = ["kv_cache_recur_budget", "inject_mode"]
+    for key in deprecated_keys:
+        if key in model_config_kwargs:
+            model_config_kwargs.pop(key)
+            log0(f"Removed deprecated config key: {key}")
+
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
     # No patches currently needed
     pass
+
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:
@@ -51,6 +64,7 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
+
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
     model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
@@ -62,7 +76,7 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
+    with open(meta_path, encoding="utf-8") as f:
         meta_data = json.load(f)
     return model_data, optimizer_data, meta_data
 
@@ -76,12 +90,13 @@ def build_model(checkpoint_dir, step, device, phase):
     - meta data saved during base model training
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
-    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    model_data, optimizer_data, meta_data = load_checkpoint(
+        checkpoint_dir, step, device, load_optimizer=False
+    )
     if device.type in {"cpu", "mps"}:
         # Convert bfloat16 tensors to float for CPU inference
         model_data = {
-            k: v.float() if v.dtype == torch.bfloat16 else v
-            for k, v in model_data.items()
+            k: v.float() if v.dtype == torch.bfloat16 else v for k, v in model_data.items()
         }
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
@@ -94,7 +109,7 @@ def build_model(checkpoint_dir, step, device, phase):
         model = GPT(model_config)
     # Load the model state
     model.to_empty(device=device)
-    model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
+    model.init_weights()  # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
     model.load_state_dict(model_data, strict=True, assign=True)
     # Put the model in the right training phase / mode
     if phase == "eval":
@@ -104,13 +119,17 @@ def build_model(checkpoint_dir, step, device, phase):
     # Load the Tokenizer
     tokenizer = get_tokenizer()
     # Sanity check: compatibility between model and tokenizer
-    assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"], f"Tokenizer vocab size {tokenizer.get_vocab_size()} does not match model config vocab size {model_config_kwargs['vocab_size']}"
+    assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"], (
+        f"Tokenizer vocab size {tokenizer.get_vocab_size()} does not match model config vocab size {model_config_kwargs['vocab_size']}"
+    )
     return model, tokenizer, meta_data
 
 
 def find_largest_model(checkpoints_dir):
     # attempt to guess the model tag: take the biggest model available
-    model_tags = [f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))]
+    model_tags = [
+        f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))
+    ]
     if not model_tags:
         raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}")
     # 1) normally all model tags are of the form d<number>, try that first:
@@ -136,8 +155,10 @@ def find_last_step(checkpoint_dir):
     last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
     return last_step
 
+
 # -----------------------------------------------------------------------------
 # convenience functions that take into account nanochat's directory structure
+
 
 def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=None):
     if model_tag is None:
@@ -153,6 +174,7 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag=None, step=Non
     log0(f"Loading model from {checkpoint_dir} with step {step}")
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
+
 
 def load_model(source, *args, **kwargs):
     model_dir = {

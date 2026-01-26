@@ -4,22 +4,29 @@ Test Engine class. Example run:
 python -m pytest tests/test_engine.py -v
 """
 
-import torch
-from nanochat.engine import KVCache, Engine
 from dataclasses import dataclass
 
+import torch
+
+from nanochat.engine import Engine, KVCache
 
 # -----------------------------------------------------------------------------
 # Mock classes for testing Engine without loading a real model
 
+
 @dataclass
 class MockConfig:
     """Minimal config for Engine tests."""
+
     n_kv_head: int = 4
     n_head: int = 4
     n_embd: int = 64
     n_layer: int = 2
     sequence_len: int = 128
+    # Looped transformer config
+    n_prelude: int = 1
+    n_recur_block: int = 1
+    n_coda: int = 1
 
 
 class MockModel:
@@ -28,23 +35,28 @@ class MockModel:
     This ensures that with temperature > 0, different samples should
     (with very high probability) produce different tokens.
     """
+
     def __init__(self, vocab_size=262):  # 256 bytes + 6 special tokens
         self.vocab_size = vocab_size
         self.config = MockConfig()
-        self._device = "cpu"
+        self._device = torch.device("cpu")
 
     def get_device(self):
         return self._device
 
-    def forward(self, ids, kv_cache=None):
-        """Return uniform logits so sampling is spread across vocab."""
+    def forward(self, ids, kv_cache=None, num_recur=None, warm_start_state=None):
+        """Return uniform logits and mock warm_start_state for looped transformer."""
         B, T = ids.shape
         # With FA3, flash_attn_with_kvcache updates cache in-place and we advance position
         if kv_cache is not None:
             kv_cache.advance(T)
         # Uniform logits -> equal probability for all tokens
         logits = torch.zeros(B, T, self.vocab_size)
-        return logits
+        # Mock warm_start_state (recurrent state) - just zeros with shape (B, T, n_embd)
+        # If warm_start_state is provided, we just pass it through (in real model it would be used)
+        if warm_start_state is None:
+            warm_start_state = torch.zeros(B, T, self.config.n_embd)
+        return logits, warm_start_state
 
 
 class ByteTokenizer:
@@ -52,6 +64,7 @@ class ByteTokenizer:
     Simple byte-level tokenizer for testing.
     Tokens 0-255 are raw bytes, 256+ are special tokens.
     """
+
     def __init__(self):
         # Special tokens start at 256
         self._special_tokens = {
@@ -80,6 +93,7 @@ class ByteTokenizer:
         # Filter out special tokens before decoding
         byte_tokens = [t for t in tokens if t < 256]
         return bytes(byte_tokens).decode("utf-8", errors="replace")
+
 
 def test_kv_cache_basic():
     """Test basic KVCache functionality for FA3."""
@@ -130,8 +144,13 @@ def test_kv_cache_prefill():
 
     # Create source cache and advance it
     src_cache = KVCache(
-        batch_size=batch_size, num_heads=num_heads, seq_len=32,
-        head_dim=head_dim, num_layers=num_layers, device="cpu", dtype=torch.float32,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        seq_len=32,
+        head_dim=head_dim,
+        num_layers=num_layers,
+        device="cpu",
+        dtype=torch.float32,
     )
     # Write some data to source cache
     src_cache.k_cache[0, 0, :16, :, :] = 1.0
@@ -140,8 +159,13 @@ def test_kv_cache_prefill():
 
     # Create destination cache with larger seq_len
     dst_cache = KVCache(
-        batch_size=batch_size, num_heads=num_heads, seq_len=64,
-        head_dim=head_dim, num_layers=num_layers, device="cpu", dtype=torch.float32,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        seq_len=64,
+        head_dim=head_dim,
+        num_layers=num_layers,
+        device="cpu",
+        dtype=torch.float32,
     )
 
     # Prefill
@@ -220,7 +244,9 @@ def test_temperature_zero_determinism():
     r1, _ = engine.generate_batch(prompt, temperature=0.0, max_tokens=5, seed=1)
     r2, _ = engine.generate_batch(prompt, temperature=0.0, max_tokens=5, seed=42)
     r3, _ = engine.generate_batch(prompt, temperature=0.0, max_tokens=5, seed=123)
-    assert r1 == r2 == r3, "Temperature=0 must result in the same output for the same prompt regardless of seed."
+    assert r1 == r2 == r3, (
+        "Temperature=0 must result in the same output for the same prompt regardless of seed."
+    )
 
 
 def test_max_tokens_respected():
@@ -232,7 +258,9 @@ def test_max_tokens_respected():
     for max_tokens in [1, 4, 16, 64]:
         results, _ = engine.generate_batch(prompt, max_tokens=max_tokens)
         num_generated_tokens = len(results[0]) - len(prompt)
-        assert num_generated_tokens <= max_tokens, f"Generated {num_generated_tokens} tokens, expected max_tokens={max_tokens} or less."
+        assert num_generated_tokens <= max_tokens, (
+            f"Generated {num_generated_tokens} tokens, expected max_tokens={max_tokens} or less."
+        )
 
 
 def test_num_samples_count():
@@ -243,7 +271,9 @@ def test_num_samples_count():
 
     for num_samples in [1, 4, 16, 64]:
         results, _ = engine.generate_batch(prompt, num_samples=num_samples, max_tokens=3)
-        assert len(results) == num_samples, f"Expected {num_samples} sequences from {num_samples} samples, got {len(results)}"
+        assert len(results) == num_samples, (
+            f"Expected {num_samples} sequences from {num_samples} samples, got {len(results)}"
+        )
 
 
 def test_different_seeds_introduce_variation_when_temperature_nonzero():
@@ -264,4 +294,6 @@ def test_different_seeds_introduce_variation_when_temperature_nonzero():
         outputs.add(tuple(results[0]))
 
     # Sanity check: sampling actually introduces variation
-    assert len(outputs) > 1, "All seeds produced the same output which is statistically highly improbable."
+    assert len(outputs) > 1, (
+        "All seeds produced the same output which is statistically highly improbable."
+    )

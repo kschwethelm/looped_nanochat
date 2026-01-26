@@ -6,7 +6,9 @@ Usage:
 """
 
 import argparse
+
 import torch
+
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
 
@@ -30,6 +32,14 @@ def print_model_structure(config: GPTConfig) -> None:
     print(f"Number of KV heads:  {config.n_kv_head}")
     print(f"Embedding dim:       {config.n_embd}")
     print(f"Window pattern:      {config.window_pattern}")
+    print()
+    print("Looped Transformer Configuration:")
+    print(f"  Prelude layers:    {config.n_prelude}")
+    print(f"  Recurrent block:   {config.n_recur_block}")
+    print(f"  Coda layers:       {config.n_coda}")
+    print(f"  Train recur mean:  {config.train_recur_mean}")
+    print(f"  Train recur max:   {config.train_recur_max}")
+    print(f"  BPTT-k:            {config.bptt_k}")
     print()
 
     # Print parameter counts
@@ -63,20 +73,39 @@ def print_model_structure(config: GPTConfig) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Print GPT model structure")
-    parser.add_argument(
-        "--depth", type=int, default=20, help="Number of transformer layers"
-    )
+    parser.add_argument("--depth", type=int, default=20, help="Number of transformer layers")
     parser.add_argument(
         "--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio"
     )
+    parser.add_argument("--head-dim", type=int, default=128, help="Target head dimension")
+    parser.add_argument("--max-seq-len", type=int, default=2048, help="Max context length")
+    parser.add_argument("--window-pattern", type=str, default="SSSL", help="Sliding window pattern")
+    # Looped Transformer config
+    parser.add_argument("--n-prelude", type=int, default=2, help="Number of prelude layers")
     parser.add_argument(
-        "--head-dim", type=int, default=128, help="Target head dimension"
+        "--n-recur-block",
+        type=int,
+        default=4,
+        help="Number of layers in the recurrent block",
+    )
+    parser.add_argument("--n-coda", type=int, default=2, help="Number of coda layers")
+    parser.add_argument(
+        "--train-recur-mean",
+        type=float,
+        default=4.0,
+        help="Mean recurrences during training (also default r at inference); r=4 gives 20 effective layers",
     )
     parser.add_argument(
-        "--max-seq-len", type=int, default=2048, help="Max context length"
+        "--train-recur-max",
+        type=int,
+        default=16,
+        help="Max recurrences sampled during training",
     )
     parser.add_argument(
-        "--window-pattern", type=str, default="SSSL", help="Sliding window pattern"
+        "--bptt-k",
+        type=int,
+        default=4,
+        help="Truncate backprop to last k recurrences (limits gradient depth)",
     )
     args = parser.parse_args()
 
@@ -109,6 +138,13 @@ if __name__ == "__main__":
         n_kv_head=n_kv_head,
         n_embd=n_embd,
         window_pattern=args.window_pattern,
+        # Looped Transformer config
+        n_prelude=args.n_prelude,
+        n_recur_block=args.n_recur_block,
+        n_coda=args.n_coda,
+        train_recur_mean=args.train_recur_mean,
+        train_recur_max=args.train_recur_max,
+        bptt_k=args.bptt_k,
     )
 
     # Print structure

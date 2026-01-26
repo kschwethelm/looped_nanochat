@@ -13,11 +13,13 @@ Note on test structure:
     2. TestSDPAOnly: Tests that only exercise the SDPA fallback path. These can run
        on any device (CUDA, CPU, MPS) with the appropriate dtype for that device.
 """
-import torch
+
 import pytest
+import torch
+
 import nanochat.flash_attention as fa_module
-from nanochat.flash_attention import flash_attn, HAS_FA3
 from nanochat.engine import KVCache
+from nanochat.flash_attention import HAS_FA3, flash_attn
 
 
 def set_impl(impl):
@@ -27,9 +29,9 @@ def set_impl(impl):
 
 def run_both_impls(fn):
     """Run a function with both FA3 and SDPA, return both outputs."""
-    set_impl('fa3')
+    set_impl("fa3")
     out_fa3 = fn()
-    set_impl('sdpa')
+    set_impl("sdpa")
     out_sdpa = fn()
     set_impl(None)  # reset
     return out_fa3, out_sdpa
@@ -39,8 +41,9 @@ def assert_close(t1, t2, name, atol=1e-2, rtol=1e-2):
     """Assert two tensors are close, with helpful error message."""
     max_diff = (t1 - t2).abs().max().item()
     mean_diff = (t1 - t2).abs().mean().item()
-    assert torch.allclose(t1, t2, atol=atol, rtol=rtol), \
+    assert torch.allclose(t1, t2, atol=atol, rtol=rtol), (
         f"{name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}"
+    )
     return max_diff, mean_diff
 
 
@@ -142,9 +145,14 @@ class TestFA3VsSDPA:
             v_cache = torch.zeros(B, T_max, H, D, device=self.DEVICE, dtype=self.DTYPE)
             cache_seqlens = torch.zeros(B, dtype=torch.int32, device=self.DEVICE)
             return flash_attn.flash_attn_with_kvcache(
-                q, k_cache, v_cache, k=k, v=v,
+                q,
+                k_cache,
+                v_cache,
+                k=k,
+                v=v,
                 cache_seqlens=cache_seqlens,
-                causal=True, window_size=(T_max, 0)
+                causal=True,
+                window_size=(T_max, 0),
             )
 
         y_fa3, y_sdpa = run_both_impls(run)
@@ -169,9 +177,14 @@ class TestFA3VsSDPA:
             v_cache[:, :T_prefill, :, :] = v_init
             cache_seqlens = torch.full((B,), T_prefill, dtype=torch.int32, device=self.DEVICE)
             return flash_attn.flash_attn_with_kvcache(
-                q_single, k_cache, v_cache, k=k_single, v=v_single,
+                q_single,
+                k_cache,
+                v_cache,
+                k=k_single,
+                v=v_single,
                 cache_seqlens=cache_seqlens,
-                causal=True, window_size=(T_max, 0)
+                causal=True,
+                window_size=(T_max, 0),
             )
 
         y_fa3, y_sdpa = run_both_impls(run)
@@ -195,9 +208,9 @@ class TestFA3VsSDPA:
             loss.backward()
             return y.detach(), q.grad.detach(), k.grad.detach(), v.grad.detach()
 
-        set_impl('fa3')
+        set_impl("fa3")
         y_fa3, q_grad_fa3, k_grad_fa3, v_grad_fa3 = run()
-        set_impl('sdpa')
+        set_impl("sdpa")
         y_sdpa, q_grad_sdpa, k_grad_sdpa, v_grad_sdpa = run()
         set_impl(None)
 
@@ -225,7 +238,7 @@ class TestSDPAOnly:
 
     def test_basic_forward(self):
         """Test SDPA forward pass produces valid output."""
-        set_impl('sdpa')
+        set_impl("sdpa")
         B, T, H, D = 2, 64, 4, 32
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
         k = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -239,7 +252,7 @@ class TestSDPAOnly:
 
     def test_backward(self):
         """Test gradients flow through SDPA."""
-        set_impl('sdpa')
+        set_impl("sdpa")
         B, T, H, D = 2, 32, 4, 16
         q = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE, requires_grad=True)
         k = torch.randn(B, T, H, D, device=self.DEVICE, dtype=self.DTYPE, requires_grad=True)
@@ -257,13 +270,18 @@ class TestSDPAOnly:
 
     def test_kvcache(self):
         """Test SDPA with KV cache."""
-        set_impl('sdpa')
+        set_impl("sdpa")
         B, T_max, H, D = 2, 64, 4, 32
         n_layers = 1
 
         cache = KVCache(
-            batch_size=B, num_heads=H, seq_len=T_max, head_dim=D,
-            num_layers=n_layers, device=self.DEVICE, dtype=self.DTYPE
+            batch_size=B,
+            num_heads=H,
+            seq_len=T_max,
+            head_dim=D,
+            num_layers=n_layers,
+            device=self.DEVICE,
+            dtype=self.DTYPE,
         )
         k_cache, v_cache = cache.get_layer_cache(0)
 
@@ -274,9 +292,14 @@ class TestSDPAOnly:
         v = torch.randn(B, T_prefill, H, D, device=self.DEVICE, dtype=self.DTYPE)
 
         y = flash_attn.flash_attn_with_kvcache(
-            q, k_cache, v_cache, k=k, v=v,
+            q,
+            k_cache,
+            v_cache,
+            k=k,
+            v=v,
             cache_seqlens=cache.cache_seqlens,
-            causal=True, window_size=(T_max, 0)
+            causal=True,
+            window_size=(T_max, 0),
         )
         cache.advance(T_prefill)
 
@@ -289,9 +312,14 @@ class TestSDPAOnly:
         v_single = torch.randn(B, 1, H, D, device=self.DEVICE, dtype=self.DTYPE)
 
         y_single = flash_attn.flash_attn_with_kvcache(
-            q_single, k_cache, v_cache, k=k_single, v=v_single,
+            q_single,
+            k_cache,
+            v_cache,
+            k=k_single,
+            v=v_single,
             cache_seqlens=cache.cache_seqlens,
-            causal=True, window_size=(T_max, 0)
+            causal=True,
+            window_size=(T_max, 0),
         )
         cache.advance(1)
 
@@ -309,13 +337,13 @@ class TestOverrideMechanism:
     @pytest.mark.skipif(not HAS_FA3, reason="FA3 required")
     def test_override_fa3(self):
         """Test that override='fa3' uses FA3."""
-        set_impl('fa3')
+        set_impl("fa3")
         assert fa_module._use_fa3() == True
         set_impl(None)
 
     def test_override_sdpa(self):
         """Test that override='sdpa' uses SDPA."""
-        set_impl('sdpa')
+        set_impl("sdpa")
         assert fa_module._use_fa3() == False
         set_impl(None)
 
