@@ -10,6 +10,7 @@ Research code optimized for rapid iteration and debugging:
 - Type hints on all signatures (modern syntax: `str | None`, `list[int]`)
 - Self-documenting names > comments
 - Use loguru for logging (not print)
+- Run ruff after changes: `uv run ruff format . && uv run ruff check --fix .`
 
 ## Conventions
 - Files: `snake_case.py`
