@@ -44,8 +44,6 @@ class GPTConfig:
     n_prelude: int = 2
     n_recur_block: int = 4
     n_coda: int = 2
-    # -> Inference
-    n_loops: int = 4  # number of times to run the recurrent block during inference
 
     # Looped Transformer traning options
     train_recur_mean: float = (
@@ -446,7 +444,7 @@ class GPT(nn.Module):
         # 2. Prelude blocks (run once)
         # For inference with KV cache, prelude uses cache_write=True
         for i, block in enumerate(self.transformer.prelude):
-            x = block(x, cos_sin, kv_cache)
+            x = block(x, cos_sin, self.window_sizes[i], kv_cache)
         e = x  # prelude output, used for injection into each recurrence
 
         # 3. Initialize recurrent state
@@ -459,7 +457,7 @@ class GPT(nn.Module):
             s = u  # update recurrent state
             # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
             for j, block in enumerate(self.transformer.recur):
-                u = block(u, cos_sin, kv_cache)
+                u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache)
             # TODO: No normalization? u = norm(u)?
             s = u  # update recurrent state
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
@@ -470,7 +468,7 @@ class GPT(nn.Module):
         # 5. Coda blocks (run once)
         x = s
         for i, block in enumerate(self.transformer.coda):
-            x = block(x, cos_sin, kv_cache)
+            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache)
         x = norm(x)
 
         # Forward the lm_head (compute logits)
