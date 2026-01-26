@@ -22,6 +22,11 @@ Research code optimized for rapid iteration and debugging:
 - ❌ NEVER: manually edit pyproject.toml
 - ❌ NEVER: `pip install` or `uv pip install`
 
+## Running Code
+Python scripts must be run within the uv environment:
+- **Option 1**: `uv run python script.py` (recommended for one-off commands)
+- **Option 2**: Activate environment first with `source .venv/bin/activate`, then run normally
+
 ## Debugging
 Check `.venv` source code directly for library implementation details
 
