@@ -158,17 +158,18 @@ python -m pytest tests/test_engine.py -v -s
 │   ├── scaling_laws.sh             # Scaling laws experiments
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20
 ├── scripts
-│   ├── base_eval.py                # Base model: calculate CORE score
-│   ├── base_loss.py                # Base model: calculate bits per byte, sample
-│   ├── base_train.py               # Base model: train
-│   ├── chat_cli.py                 # Chat model (SFT/Mid): talk to over CLI
-│   ├── chat_eval.py                # Chat model (SFT/Mid): eval tasks
-│   ├── chat_rl.py                  # Chat model (SFT/Mid): reinforcement learning
-│   ├── chat_sft.py                 # Chat model: train SFT
-│   ├── chat_web.py                 # Chat model (SFT/Mid): talk to over WebUI
-│   ├── mid_train.py                # Chat model: midtraining
-│   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
-│   └── tok_train.py                # Tokenizer: train it
+│   ├── tok_train.py                # Tokenizer: train BPE tokenizer from scratch
+│   ├── tok_eval.py                 # Tokenizer: eval compression vs GPT-2/GPT-4
+│   ├── base_train.py               # Base model: pretrain with Muon (+AdamW) optimizer
+│   ├── base_loss.py                # Base model: eval bits-per-byte, generate samples
+│   ├── base_eval.py                # Base model: eval on CORE benchmark
+│   ├── mid_train.py                # Midtraining: continued pretraining w/ mixed data
+│   ├── chat_sft.py                 # Supervised fine-tuning: base to chat model
+│   ├── chat_rl.py                  # RL: train on GSM8K with REINFORCE/GRPO
+│   ├── chat_eval.py                # Chat model: eval ARC/MMLU/GSM8K/HumanEval/etc
+│   ├── chat_cli.py                 # Chat model: interactive CLI interface
+│   ├── chat_web.py                 # Chat model: FastAPI web server with UI
+│   └── pull_from_hf.py             # Utility: download checkpoints from HuggingFace
 ├── tasks
 │   ├── arc.py                      # Multiple choice science questions
 │   ├── common.py                   # TaskMixture | TaskSequence
