@@ -10,6 +10,7 @@
 #SBATCH --ntasks=1
 
 cd /dss/dsshome1/0D/go68tos2/looped_nanochat
+uv sync
 source .venv/bin/activate
 
 BASE_DIR="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000"
@@ -24,5 +25,7 @@ export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/nanochat"
 hf download Trelis/nanochat-recursive \
   --include "base/d20/model_021292.pt" "base/d20/meta_021292.json" "mid/*" "sft/*" "tokenizer/*" \
   --local-dir "$NANOCHAT_BASE_DIR" --repo-type model
+
+rm -r $BASE_DIR/kristian/.cache/nanochat/.cache
 
 echo "Download complete to $NANOCHAT_BASE_DIR"
