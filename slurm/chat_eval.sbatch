@@ -9,16 +9,20 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --ntasks=1
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=k.schwethelm@tum.de
 
 cd /dss/dsshome1/0D/go68tos2/looped_nanochat
+uv sync
 source .venv/bin/activate
 
+BASE_DIR="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000"
 # Set cache directories (datasets as subdirectory of HF_HOME)
-export HF_HOME="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000/LLMs/.cache/huggingface"
-export HF_DATASETS_CACHE="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000/LLMs/.cache/huggingface/datasets"
+export HF_HOME="$BASE_DIR/LLMs/.cache/huggingface"
+export HF_DATASETS_CACHE="$BASE_DIR/LLMs/.cache/huggingface/datasets"
 
 # Set nanochat directory
-export NANOCHAT_BASE_DIR="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000/kristian/.cache/nanochat"
+export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/nanochat"
 
 # Number of processes/GPUs to use
 NPROC_PER_NODE=1
@@ -30,5 +34,8 @@ NPROC_PER_NODE=1
 #   -d/--dtype: float32|bfloat16 (default: bfloat16)
 #   -b/--batch-size: batch size for categorical evaluation (default: 8)
 #   -x/--max-problems: limit number of problems (optional)
+#   -g/--model-tag: Model tag to load (optional)
+#   -s/--step: Step to load (optional)
 #   --num-recur: number of recurrences for recursive transformer (optional)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
+    -- -i sft -g d20

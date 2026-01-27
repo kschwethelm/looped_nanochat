@@ -29,3 +29,15 @@ hf download Trelis/nanochat-recursive \
 rm -r $BASE_DIR/kristian/.cache/nanochat/.cache
 
 echo "Download complete to $NANOCHAT_BASE_DIR"
+
+# Rename folders
+cd "$NANOCHAT_BASE_DIR"
+[ -d "base" ] && mv base base_checkpoints && echo "Renamed base -> base_checkpoints"
+[ -d "mid" ] && mv mid mid_checkpoints && echo "Renamed mid -> mid_checkpoints"
+[ -d "sft" ] && mv sft chatsft_checkpoints && echo "Renamed sft -> chatsft_checkpoints"
+[ -d "rl" ] && mv rl chatrl_checkpoints && echo "Renamed rl -> chatrl_checkpoints"
+
+# Move tokenizer contents from latest subdirectory to parent
+[ -d "tokenizer/latest" ] && mv tokenizer/latest/* tokenizer/ && rmdir tokenizer/latest && echo "Moved tokenizer/latest/* to tokenizer/"
+
+echo "All renaming complete"
