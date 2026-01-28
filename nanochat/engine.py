@@ -220,6 +220,7 @@ class Engine:
         top_k=None,
         seed=42,
         num_recur=None,
+        use_warm_start=False,
     ):
         """Same as generate, but does single prefill and then clones the KV cache."""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
@@ -313,7 +314,7 @@ class Engine:
                 # Update the state of this row to include the next token
                 state.current_tokens.append(next_token)
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
-                if next_token == assistant_end or next_token == bos:
+                if next_token in (assistant_end, bos):
                     state.completed = True
                 # Handle tool logic
                 if next_token == python_start:
@@ -343,7 +344,7 @@ class Engine:
                 ids,
                 kv_cache=kv_cache_decode,
                 num_recur=num_recur,
-                warm_start_state=warm_start_state,
+                warm_start_state=warm_start_state if use_warm_start else None,
             )
             logits = logits[:, -1, :]  # (B, vocab_size)
 
@@ -361,7 +362,7 @@ class Engine:
         for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
-                    if token == assistant_end or token == bos:
+                    if token in (assistant_end, bos):
                         completed[i] = True
                     else:
                         results[i].append(token)
@@ -392,7 +393,7 @@ if __name__ == "__main__":
     model, tokenizer, meta = load_model("base", device, phase="eval")
     bos_token_id = tokenizer.get_bos_token_id()
     # common hyperparameters
-    kwargs = dict(max_tokens=64, temperature=0.0)
+    kwargs = {"max_tokens": 64, "temperature": 0.0}
     # set the starting prompt
     prompt_tokens = tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
     # generate the reference sequence using the model.generate() function
@@ -417,7 +418,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     t0 = time.time()
     with autocast_ctx:
-        for token_column, token_masks in stream:
+        for token_column, _token_masks in stream:
             token = token_column[0]  # only print out the first row
             generated_tokens.append(token)
             chunk = tokenizer.decode([token])

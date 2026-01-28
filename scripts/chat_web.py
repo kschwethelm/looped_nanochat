@@ -87,6 +87,12 @@ parser.add_argument(
     help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
 )
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
+parser.add_argument(
+    "-rws",
+    "--use-rec-warm-start",
+    action="store_true",
+    help="Use warm-start (carry recurrent state token-to-token)",
+)
 args = parser.parse_args()
 
 # Configure logging for conversation traffic
@@ -116,17 +122,12 @@ class WorkerPool:
 
     def __init__(self, num_gpus: int | None = None):
         if num_gpus is None:
-            if device_type == "cuda":
-                num_gpus = torch.cuda.device_count()
-            else:
-                num_gpus = 1  # e.g. cpu|mps
+            num_gpus = torch.cuda.device_count() if device_type == "cuda" else 1  # e.g. cpu|mps
         self.num_gpus = num_gpus
         self.workers: list[Worker] = []
         self.available_workers: asyncio.Queue = asyncio.Queue()
 
-    async def initialize(
-        self, source: str, model_tag: str | None = None, step: int | None = None
-    ):
+    async def initialize(self, source: str, model_tag: str | None = None, step: int | None = None):
         """Load model on each GPU."""
         print(f"Initializing worker pool with {self.num_gpus} GPUs...")
         if self.num_gpus > 1:
@@ -225,27 +226,28 @@ def validate_chat_request(request: ChatRequest):
             )
 
     # Validate temperature
-    if request.temperature is not None:
-        if not (MIN_TEMPERATURE <= request.temperature <= MAX_TEMPERATURE):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Temperature must be between {MIN_TEMPERATURE} and {MAX_TEMPERATURE}",
-            )
+    if request.temperature is not None and not (
+        MIN_TEMPERATURE <= request.temperature <= MAX_TEMPERATURE
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Temperature must be between {MIN_TEMPERATURE} and {MAX_TEMPERATURE}",
+        )
 
     # Validate top_k
-    if request.top_k is not None:
-        if not (MIN_TOP_K <= request.top_k <= MAX_TOP_K):
-            raise HTTPException(
-                status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}"
-            )
+    if request.top_k is not None and not (MIN_TOP_K <= request.top_k <= MAX_TOP_K):
+        raise HTTPException(
+            status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}"
+        )
 
     # Validate max_tokens
-    if request.max_tokens is not None:
-        if not (MIN_MAX_TOKENS <= request.max_tokens <= MAX_MAX_TOKENS):
-            raise HTTPException(
-                status_code=400,
-                detail=f"max_tokens must be between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}",
-            )
+    if request.max_tokens is not None and not (
+        MIN_MAX_TOKENS <= request.max_tokens <= MAX_MAX_TOKENS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_tokens must be between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}",
+        )
 
 
 @asynccontextmanager
@@ -290,12 +292,13 @@ async def logo():
 
 
 async def generate_stream(
-    worker: Worker, tokens, temperature=None, max_new_tokens=None, top_k=None
+    worker: Worker, tokens, temperature=None, max_new_tokens=None, top_k=None, use_warm_start=None
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
+    use_warm_start = use_warm_start if use_warm_start is not None else args.use_rec_warm_start
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
@@ -306,18 +309,19 @@ async def generate_stream(
     last_clean_text = ""
 
     with worker.autocast_ctx:
-        for token_column, token_masks in worker.engine.generate(
+        for token_column, _token_masks in worker.engine.generate(
             tokens,
             num_samples=1,
             max_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
             seed=random.randint(0, 2**31 - 1),
+            use_warm_start=use_warm_start,
         ):
             token = token_column[0]
 
             # Stopping criteria
-            if token == assistant_end or token == bos:
+            if token in (assistant_end, bos):
                 break
 
             # Append the token to sequence
@@ -346,7 +350,7 @@ async def chat_completions(request: ChatRequest):
 
     # Log incoming conversation to console
     logger.info("=" * 20)
-    for i, message in enumerate(request.messages):
+    for message in request.messages:
         logger.info(f"[{message.role.upper()}]: {message.content}")
     logger.info("-" * 20)
 

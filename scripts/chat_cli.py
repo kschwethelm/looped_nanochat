@@ -35,6 +35,12 @@ parser.add_argument(
     help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
 )
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
+parser.add_argument(
+    "-rws",
+    "--use-rec-warm-start",
+    action="store_true",
+    help="Use warm-start (carry recurrent state token-to-token)",
+)
 args = parser.parse_args()
 
 # Init the model and tokenizer
@@ -110,11 +116,12 @@ while True:
         "max_tokens": 256,
         "temperature": args.temperature,
         "top_k": args.top_k,
+        "use_warm_start": args.use_rec_warm_start,
     }
     response_tokens = []
     print("\nAssistant: ", end="", flush=True)
     with autocast_ctx:
-        for token_column, token_masks in engine.generate(
+        for token_column, _token_masks in engine.generate(
             conversation_tokens, num_recur=None, **generate_kwargs
         ):
             token = token_column[0]  # pop the batch dimension (num_samples=1)

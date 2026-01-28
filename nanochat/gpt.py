@@ -58,10 +58,7 @@ class GPTConfig:
     # Looped Transformer traning options
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
-    recur_warm_start: bool = True  # warm-start recurrence from previous token's final state
-    bptt_k: int = (
-        4  # truncate backprop to last k recurrences (you have this in code but not config)
-    )
+    bptt_k: int = 4  # truncate backprop to last k recurrences
 
 
 def norm(x):
@@ -435,16 +432,18 @@ class GPT(nn.Module):
             f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}"
         )
         adam_groups = [
-            dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
-            dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
+            {"params": lm_head_params, "lr": unembedding_lr * dmodel_lr_scale},
+            {"params": embedding_params, "lr": embedding_lr * dmodel_lr_scale},
         ]
-        adamw_kwargs = dict(
-            betas=adam_betas, eps=1e-10, weight_decay=0.0
-        )  # NOTE: weight decay is hardcoded to 0.0 for AdamW, only used in Muon
+        adamw_kwargs = {
+            "betas": adam_betas,
+            "eps": 1e-10,
+            "weight_decay": 0.0,
+        }  # NOTE: weight decay is hardcoded to 0.0 for AdamW, only used in Muon
         AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
         adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
         # Create the Muon optimizer for the linear layers
-        muon_kwargs = dict(lr=matrix_lr, momentum=0.95, weight_decay=weight_decay)
+        muon_kwargs = {"lr": matrix_lr, "momentum": 0.95, "weight_decay": weight_decay}
         MuonFactory = DistMuon if ddp else Muon
         muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)
         # Combine them the two optimizers into one list
@@ -493,8 +492,8 @@ class GPT(nn.Module):
         e = x  # prelude output, used for injection into each recurrence
 
         # 3. Initialize recurrent state
-        # If warm_start_state provided and config allows, use it; otherwise start from e
-        if warm_start_state is not None and self.config.recur_warm_start:
+        # If warm_start_state provided, use it; otherwise start from e
+        if warm_start_state is not None:
             # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
             if warm_start_state.size(1) != T:
                 s = warm_start_state.expand(-1, T, -1)

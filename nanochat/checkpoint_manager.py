@@ -32,7 +32,7 @@ def _patch_missing_config_keys(model_config_kwargs):
         log0("Patching missing window_pattern in model config to 'L'")
 
     # Remove deprecated config keys
-    deprecated_keys = ["kv_cache_recur_budget", "inject_mode"]
+    deprecated_keys = ["kv_cache_recur_budget", "inject_mode", "recur_warm_start"]
     for key in deprecated_keys:
         if key in model_config_kwargs:
             model_config_kwargs.pop(key)
