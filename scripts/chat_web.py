@@ -93,6 +93,13 @@ parser.add_argument(
     action="store_true",
     help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
 )
+parser.add_argument(
+    "--kv-cache-mode",
+    type=str,
+    default="final",
+    choices=["final", "all"],
+    help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
+)
 args = parser.parse_args()
 
 # Configure logging for conversation traffic
@@ -292,13 +299,20 @@ async def logo():
 
 
 async def generate_stream(
-    worker: Worker, tokens, temperature=None, max_new_tokens=None, top_k=None, use_warm_start=None
+    worker: Worker,
+    tokens,
+    temperature=None,
+    max_new_tokens=None,
+    top_k=None,
+    use_warm_start=None,
+    kv_cache_mode=None,
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
     use_warm_start = use_warm_start if use_warm_start is not None else args.use_rec_warm_start
+    kv_cache_mode = kv_cache_mode if kv_cache_mode is not None else args.kv_cache_mode
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
@@ -317,6 +331,7 @@ async def generate_stream(
             top_k=top_k,
             seed=random.randint(0, 2**31 - 1),
             use_warm_start=use_warm_start,
+            kv_cache_mode=kv_cache_mode,
         ):
             token = token_column[0]
 

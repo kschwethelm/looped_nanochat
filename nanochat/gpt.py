@@ -76,9 +76,8 @@ def apply_rotary_emb(x, cos, sin):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config):
         super().__init__()
-        self.layer_idx = layer_idx
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
@@ -90,8 +89,12 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
-    def forward(self, x, cos_sin, window_size, kv_cache):
+    def forward(self, x, cos_sin, window_size, kv_cache, layer_idx=None):
         B, T, C = x.size()
+        # Fail fast: layer_idx required when using kv_cache
+        assert (kv_cache is None) or (layer_idx is not None), (
+            "layer_idx required when kv_cache is provided"
+        )
 
         # Project the input to get queries, keys, and values
         # Shape: (B, T, H, D) - FA3's native layout, no transpose needed!
@@ -111,7 +114,7 @@ class CausalSelfAttention(nn.Module):
             y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
             # Inference: use flash_attn_with_kvcache which handles cache management
-            k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
+            k_cache, v_cache = kv_cache.get_layer_cache(layer_idx)
             y = flash_attn.flash_attn_with_kvcache(
                 q,
                 k_cache,
@@ -122,9 +125,6 @@ class CausalSelfAttention(nn.Module):
                 causal=True,
                 window_size=window_size,
             )
-            # Advance position after last layer processes
-            if self.layer_idx == kv_cache.n_layers - 1:
-                kv_cache.advance(T)
 
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
@@ -146,13 +146,13 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos_sin, window_size, kv_cache):
-        x = x + self.attn(norm(x), cos_sin, window_size, kv_cache)
+    def forward(self, x, cos_sin, window_size, kv_cache, layer_idx=None):
+        x = x + self.attn(norm(x), cos_sin, window_size, kv_cache, layer_idx)
         x = x + self.mlp(norm(x))
         return x
 
@@ -186,21 +186,9 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(padded_vocab_size, config.n_embd),
-                "prelude": nn.ModuleList(
-                    [Block(config, layer_idx) for layer_idx in range(config.n_prelude)]
-                ),
-                "recur": nn.ModuleList(
-                    [
-                        Block(config, config.n_prelude + layer_idx)
-                        for layer_idx in range(config.n_recur_block)
-                    ]
-                ),
-                "coda": nn.ModuleList(
-                    [
-                        Block(config, config.n_prelude + config.n_recur_block + layer_idx)
-                        for layer_idx in range(config.n_coda)
-                    ]
-                ),
+                "prelude": nn.ModuleList([Block(config) for _ in range(config.n_prelude)]),
+                "recur": nn.ModuleList([Block(config) for _ in range(config.n_recur_block)]),
+                "coda": nn.ModuleList([Block(config) for _ in range(config.n_coda)]),
             }
         )
         # Input injection adapter
@@ -461,10 +449,36 @@ class GPT(nn.Module):
         loss_reduction="mean",
         num_recur=None,
         warm_start_state=None,
+        kv_cache_mode: str | None = None,
     ):
+        """
+        Args:
+            kv_cache_mode: KV cache strategy for recurrent blocks. Options:
+                - None or "final": Only cache final recurrence (default, memory efficient)
+                - "all": Cache all recurrences (allows attention across all loop states)
+        """
         B, T = idx.size()
         if num_recur is None:
             num_recur = int(self.config.train_recur_mean)
+
+        # Validate and normalize kv_cache_mode
+        if kv_cache_mode is None:
+            kv_cache_mode = "final"
+        assert kv_cache_mode in ("final", "all"), (
+            f"Invalid kv_cache_mode: {kv_cache_mode}. Must be 'final' or 'all'"
+        )
+
+        # Validate KV cache compatibility with current mode and num_recur
+        if kv_cache is not None and hasattr(kv_cache, "mode") and kv_cache.mode is not None:
+            assert kv_cache.mode == kv_cache_mode, (
+                f"KV cache was allocated for '{kv_cache.mode}' mode, but called with '{kv_cache_mode}' mode. "
+                f"Cache structure is incompatible between modes."
+            )
+            if kv_cache.num_recur is not None and kv_cache.mode == "all":
+                assert kv_cache.num_recur == num_recur, (
+                    f"KV cache was allocated for num_recur={kv_cache.num_recur} in 'all' mode, "
+                    f"but called with num_recur={num_recur}. Cache structure is incompatible."
+                )
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert self.cos.size(1) >= T, (
@@ -486,9 +500,9 @@ class GPT(nn.Module):
         x = norm(x)
 
         # 2. Prelude blocks (run once)
-        # For inference with KV cache, prelude uses cache_write=True
         for i, block in enumerate(self.transformer.prelude):
-            x = block(x, cos_sin, self.window_sizes[i], kv_cache)
+            layer_idx = i if kv_cache is not None else None
+            x = block(x, cos_sin, self.window_sizes[i], kv_cache, layer_idx)
         e = x  # prelude output, used for injection into each recurrence
 
         # 3. Initialize recurrent state
@@ -506,9 +520,20 @@ class GPT(nn.Module):
         for i in range(num_recur):
             # Input injection: u = inject(concat(e, s))
             u = self.inject(torch.cat([e, s], dim=-1))
-            # Run recur blocks with KV cache (all recurrences can attend to previous tokens)
+            # Run recur blocks with KV cache
             for j, block in enumerate(self.transformer.recur):
-                u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache)
+                if kv_cache is not None:
+                    if kv_cache_mode == "all":
+                        # Unique cache slot for this (iteration, block) pair
+                        layer_idx = self.config.n_prelude + (i * self.config.n_recur_block) + j
+                    else:  # "final" mode
+                        # Reuse same cache slots (only final iteration persists)
+                        layer_idx = self.config.n_prelude + j
+                else:
+                    layer_idx = None
+                u = block(
+                    u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx
+                )
             # TODO: No normalization? u = norm(u)?
             s = u  # update recurrent state
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
@@ -519,13 +544,26 @@ class GPT(nn.Module):
         # 5. Coda blocks (run once)
         x = s
         for i, block in enumerate(self.transformer.coda):
+            if kv_cache is not None:
+                if kv_cache_mode == "all":
+                    # Coda comes after all recurrence slots
+                    layer_idx = self.config.n_prelude + (num_recur * self.config.n_recur_block) + i
+                else:  # "final" mode
+                    layer_idx = self.config.n_prelude + self.config.n_recur_block + i
+            else:
+                layer_idx = None
             x = block(
                 x,
                 cos_sin,
                 self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i],
                 kv_cache,
+                layer_idx,
             )
         x = norm(x)
+
+        # Advance KV cache position after all layers are done
+        if kv_cache is not None:
+            kv_cache.advance(T)
 
         # Forward the lm_head (compute logits)
         softcap = 15  # smoothly cap the logits to the range [-softcap, softcap]
