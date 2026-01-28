@@ -36,6 +36,8 @@ NPROC_PER_NODE=1
 #   -x/--max-problems: limit number of problems (optional)
 #   -g/--model-tag: Model tag to load (optional)
 #   -s/--step: Step to load (optional)
-#   --num-recur: number of recurrences for recursive transformer (optional)
+#   -r/--num-recur: number of recurrences for recursive transformer (optional)
+#   -rws/--use-rec-warm-start: Use recurrent warm-start (carry recurrent state when decoding tokens)
+#   -kv/--kv-cache-mode: KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
     -- -i sft -g d20

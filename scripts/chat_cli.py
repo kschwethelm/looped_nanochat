@@ -36,12 +36,20 @@ parser.add_argument(
 )
 parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
 parser.add_argument(
+    "-r",
+    "--num-recur",
+    type=int,
+    default=None,
+    help="Number of recurrences for recursive transformer (optional, uses model default if not specified)",
+)
+parser.add_argument(
     "-rws",
     "--use-rec-warm-start",
     action="store_true",
     help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
 )
 parser.add_argument(
+    "-kv",
     "--kv-cache-mode",
     type=str,
     default="final",
@@ -130,7 +138,7 @@ while True:
     print("\nAssistant: ", end="", flush=True)
     with autocast_ctx:
         for token_column, _token_masks in engine.generate(
-            conversation_tokens, num_recur=None, **generate_kwargs
+            conversation_tokens, num_recur=args.num_recur, **generate_kwargs
         ):
             token = token_column[0]  # pop the batch dimension (num_samples=1)
             response_tokens.append(token)

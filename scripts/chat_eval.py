@@ -290,6 +290,7 @@ if __name__ == "__main__":
         help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
     )
     parser.add_argument(
+        "-r",
         "--num-recur",
         type=str,
         default=None,
@@ -302,6 +303,7 @@ if __name__ == "__main__":
         help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
     )
     parser.add_argument(
+        "-kv",
         "--kv-cache-mode",
         type=str,
         default="final",
