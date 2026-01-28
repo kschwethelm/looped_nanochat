@@ -88,10 +88,25 @@ parser.add_argument(
 )
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
 parser.add_argument(
+    "-r",
+    "--num-recur",
+    type=int,
+    default=None,
+    help="Number of recurrences for recursive transformer (optional, uses model default if not specified)",
+)
+parser.add_argument(
     "-rws",
     "--use-rec-warm-start",
     action="store_true",
     help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+)
+parser.add_argument(
+    "-kv",
+    "--kv-cache-mode",
+    type=str,
+    default="final",
+    choices=["final", "all"],
+    help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
 )
 args = parser.parse_args()
 
@@ -292,13 +307,22 @@ async def logo():
 
 
 async def generate_stream(
-    worker: Worker, tokens, temperature=None, max_new_tokens=None, top_k=None, use_warm_start=None
+    worker: Worker,
+    tokens,
+    temperature=None,
+    max_new_tokens=None,
+    top_k=None,
+    num_recur=None,
+    use_warm_start=None,
+    kv_cache_mode=None,
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
+    num_recur = num_recur if num_recur is not None else args.num_recur
     use_warm_start = use_warm_start if use_warm_start is not None else args.use_rec_warm_start
+    kv_cache_mode = kv_cache_mode if kv_cache_mode is not None else args.kv_cache_mode
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
@@ -315,8 +339,10 @@ async def generate_stream(
             max_tokens=max_new_tokens,
             temperature=temperature,
             top_k=top_k,
+            num_recur=num_recur,
             seed=random.randint(0, 2**31 - 1),
             use_warm_start=use_warm_start,
+            kv_cache_mode=kv_cache_mode,
         ):
             token = token_column[0]
 

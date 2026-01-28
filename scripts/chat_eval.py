@@ -46,6 +46,7 @@ def run_generative_eval(
     max_problems=None,
     num_recur=None,
     use_warm_start=False,
+    kv_cache_mode="final",
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -68,6 +69,7 @@ def run_generative_eval(
             top_k=top_k,
             num_recur=num_recur,
             use_warm_start=use_warm_start,
+            kv_cache_mode=kv_cache_mode,
         )
         # Decode the completions as text
         prefix_length = len(encoded_prompt)
@@ -113,7 +115,12 @@ def run_generative_eval(
 
 
 def run_categorical_eval(
-    task_object, tokenizer, model, batch_size, max_problems=None, num_recur=None
+    task_object,
+    tokenizer,
+    model,
+    batch_size,
+    max_problems=None,
+    num_recur=None,
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -121,7 +128,10 @@ def run_categorical_eval(
 
     # We'll process batches of independent problems at a time because there is no sampling needed
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
-    ceil_div = lambda x, y: -(-x // y)
+
+    def ceil_div(x, y):
+        return -(-x // y)
+
     num_batches = ceil_div(num_problems, batch_size)
 
     # Run the evaluation
@@ -201,6 +211,7 @@ def run_chat_eval(
     max_problems=None,
     num_recur=None,
     use_warm_start=False,
+    kv_cache_mode="final",
 ):
     # Create the evaluation object
     task_module = {
@@ -226,6 +237,7 @@ def run_chat_eval(
             max_problems=max_problems,
             num_recur=num_recur,
             use_warm_start=use_warm_start,
+            kv_cache_mode=kv_cache_mode,
         )
     elif task_object.eval_type == "categorical":
         acc = run_categorical_eval(
@@ -278,6 +290,7 @@ if __name__ == "__main__":
         help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
     )
     parser.add_argument(
+        "-r",
         "--num-recur",
         type=str,
         default=None,
@@ -288,6 +301,14 @@ if __name__ == "__main__":
         "--use-rec-warm-start",
         action="store_true",
         help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+    )
+    parser.add_argument(
+        "-kv",
+        "--kv-cache-mode",
+        type=str,
+        default="final",
+        choices=["final", "all"],
+        help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
     )
     args = parser.parse_args()
 
@@ -348,6 +369,7 @@ if __name__ == "__main__":
                     max_problems=args.max_problems,
                     num_recur=num_recur,
                     use_warm_start=args.use_rec_warm_start,
+                    kv_cache_mode=args.kv_cache_mode,
                 )
                 results[task_name] = acc
                 print0(f"{task_name} accuracy: {100 * acc:.2f}%")

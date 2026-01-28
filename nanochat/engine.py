@@ -27,7 +27,7 @@ from nanochat.common import autodetect_device_type, compute_init
 # Calculator tool helpers
 @contextmanager
 def timeout(duration, formula):
-    def timeout_handler(signum, frame):
+    def timeout_handler(signum, frame):  # noqa: ARG001
         raise Exception(f"'{formula}': timed out after {duration} seconds")
 
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -56,7 +56,7 @@ def use_calculator(expr):
     expr = expr.replace(",", "")
 
     # Check if it's a pure math expression (old behavior)
-    if all([x in "0123456789*+-/.() " for x in expr]):
+    if all(x in "0123456789*+-/.() " for x in expr):
         if "**" in expr:  # disallow power operator
             return None
         return eval_with_timeout(expr)
@@ -64,7 +64,7 @@ def use_calculator(expr):
     # Check if it's a string operation we support
     # Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
     allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ "
-    if not all([x in allowed_chars for x in expr]):
+    if not all(x in allowed_chars for x in expr):
         return None
 
     # Disallow dangerous patterns
@@ -110,12 +110,25 @@ class KVCache:
     - Position tracked per batch element via cache_seqlens tensor
     """
 
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device, dtype):
+    def __init__(
+        self,
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        num_layers,
+        device,
+        dtype,
+        mode=None,
+        num_recur=None,
+    ):
         self.batch_size = batch_size
         self.max_seq_len = seq_len
         self.n_layers = num_layers
         self.n_heads = num_heads
         self.head_dim = head_dim
+        self.mode = mode  # Track cache mode: "final", "all", or None
+        self.num_recur = num_recur  # Track num_recur used during cache creation
         # Pre-allocate cache tensors: (n_layers, B, T, H, D)
         self.k_cache = torch.zeros(
             num_layers,
@@ -221,9 +234,24 @@ class Engine:
         seed=42,
         num_recur=None,
         use_warm_start=False,
+        kv_cache_mode: str | None = None,
     ):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+        """
+        Generate tokens with KV caching and optional batch sampling.
+
+        Args:
+            kv_cache_mode: KV cache strategy for recurrent blocks:
+                - None or "final": Only cache final recurrence (default, memory efficient)
+                - "all": Cache all recurrences (allows attention across all loop states)
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+
+        # Normalize kv_cache_mode
+        if kv_cache_mode is None:
+            kv_cache_mode = "final"
+        assert kv_cache_mode in ("final", "all"), (
+            f"Invalid kv_cache_mode: {kv_cache_mode}. Must be 'final' or 'all'"
+        )
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
         # Currently the repo assumes that cuda -> bfloat16 and everything else -> float32.
@@ -236,18 +264,24 @@ class Engine:
         rng.manual_seed(seed)
 
         # Get the special tokens we need to coordinate the tool use state machine
-        get_special = lambda s: self.tokenizer.encode_special(s)
-        python_start = get_special("<|python_start|>")
-        python_end = get_special("<|python_end|>")
-        output_start = get_special("<|output_start|>")
-        output_end = get_special("<|output_end|>")
-        assistant_end = get_special("<|assistant_end|>")  # if sampled, ends row
+        python_start = self.tokenizer.encode_special("<|python_start|>")
+        python_end = self.tokenizer.encode_special("<|python_end|>")
+        output_start = self.tokenizer.encode_special("<|output_start|>")
+        output_end = self.tokenizer.encode_special("<|output_end|>")
+        assistant_end = self.tokenizer.encode_special("<|assistant_end|>")  # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id()  # if sampled, ends row
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
-        # For recursive transformer: num_layers is prelude + recur + coda (each layer only caches final recurrence)
-        effective_num_layers = m.n_prelude + m.n_recur_block + m.n_coda
+        # Determine number of recurrences for cache allocation
+        cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
+        # Calculate effective number of layers based on caching mode
+        if kv_cache_mode == "all":
+            # Allocate cache for all recurrences: prelude + (recur_block * num_recur) + coda
+            effective_num_layers = m.n_prelude + (m.n_recur_block * cache_num_recur) + m.n_coda
+        else:  # "final" mode
+            # Allocate cache only for final recurrence: prelude + recur_block + coda
+            effective_num_layers = m.n_prelude + m.n_recur_block + m.n_coda
         kv_model_kwargs = {
             "num_heads": m.n_kv_head,
             "head_dim": m.n_embd // m.n_head,
@@ -258,11 +292,13 @@ class Engine:
             seq_len=len(tokens),
             device=device,
             dtype=dtype,
+            mode=kv_cache_mode,
+            num_recur=cache_num_recur,
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
         logits, warm_start_state = self.model.forward(
-            ids, kv_cache=kv_cache_prefill, num_recur=num_recur
+            ids, kv_cache=kv_cache_prefill, num_recur=num_recur, kv_cache_mode=kv_cache_mode
         )
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
         warm_start_state = warm_start_state[:, -1:, :].expand(
@@ -278,6 +314,8 @@ class Engine:
             seq_len=kv_length_hint,
             device=device,
             dtype=dtype,
+            mode=kv_cache_mode,
+            num_recur=cache_num_recur,
             **kv_model_kwargs,
         )
         kv_cache_decode.prefill(kv_cache_prefill)
@@ -345,6 +383,7 @@ class Engine:
                 kv_cache=kv_cache_decode,
                 num_recur=num_recur,
                 warm_start_state=warm_start_state if use_warm_start else None,
+                kv_cache_mode=kv_cache_mode,
             )
             logits = logits[:, -1, :]  # (B, vocab_size)
 
