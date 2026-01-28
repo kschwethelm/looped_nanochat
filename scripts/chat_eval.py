@@ -45,6 +45,7 @@ def run_generative_eval(
     top_k,
     max_problems=None,
     num_recur=None,
+    use_warm_start=False,
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -66,6 +67,7 @@ def run_generative_eval(
             temperature=temperature,
             top_k=top_k,
             num_recur=num_recur,
+            use_warm_start=use_warm_start,
         )
         # Decode the completions as text
         prefix_length = len(encoded_prompt)
@@ -198,6 +200,7 @@ def run_chat_eval(
     top_k=50,
     max_problems=None,
     num_recur=None,
+    use_warm_start=False,
 ):
     # Create the evaluation object
     task_module = {
@@ -222,6 +225,7 @@ def run_chat_eval(
             top_k,
             max_problems=max_problems,
             num_recur=num_recur,
+            use_warm_start=use_warm_start,
         )
     elif task_object.eval_type == "categorical":
         acc = run_categorical_eval(
@@ -278,6 +282,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Number of recurrences for recursive transformer. Can be single value (e.g. "4") or comma-separated list (e.g. "2,4,8,16") to evaluate multiple.',
+    )
+    parser.add_argument(
+        "-rws",
+        "--use-rec-warm-start",
+        action="store_true",
+        help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
     )
     args = parser.parse_args()
 
@@ -337,6 +347,7 @@ if __name__ == "__main__":
                     top_k=args.top_k,
                     max_problems=args.max_problems,
                     num_recur=num_recur,
+                    use_warm_start=args.use_rec_warm_start,
                 )
                 results[task_name] = acc
                 print0(f"{task_name} accuracy: {100 * acc:.2f}%")

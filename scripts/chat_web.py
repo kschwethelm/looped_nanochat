@@ -91,7 +91,7 @@ parser.add_argument(
     "-rws",
     "--use-rec-warm-start",
     action="store_true",
-    help="Use warm-start (carry recurrent state token-to-token)",
+    help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
 )
 args = parser.parse_args()
 
