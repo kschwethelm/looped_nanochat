@@ -29,12 +29,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.adamw import DistAdamW
 from nanochat.common import get_dist_info, print0
+from nanochat.optim import MuonAdamW, DistMuonAdamW
 
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
-from nanochat.muon import DistMuon, Muon
 
 
 @dataclass
@@ -391,7 +390,7 @@ class GPT(nn.Module):
         nparams = sum(p.numel() for p in self.parameters())
         return nparams
 
-    def setup_optimizers(
+    def setup_optimizer(
         self,
         unembedding_lr=0.004,
         embedding_lr=0.2,
@@ -399,8 +398,12 @@ class GPT(nn.Module):
         weight_decay=0.0,
         adam_betas=(0.8, 0.95),
     ):
+        """
+        Create combined MuonAdamW optimizer: Muon for 2D matrix params, AdamW for embeddings.
+        """
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
+
         # Separate out all parameters into groups
         matrix_params = (
             list(self.transformer.prelude.parameters())
@@ -413,33 +416,32 @@ class GPT(nn.Module):
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(
             lm_head_params
         )
-        # Create the AdamW optimizer for the embedding, lm_head, and per-layer scalars
-        # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
+
+        # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         print0(
             f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}"
         )
-        adam_groups = [
-            {"params": lm_head_params, "lr": unembedding_lr * dmodel_lr_scale},
-            {"params": embedding_params, "lr": embedding_lr * dmodel_lr_scale},
+
+        # Build param_groups with all required fields explicit
+        param_groups = [
+            # AdamW groups (embeddings, lm_head)
+            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
-        adamw_kwargs = {
-            "betas": adam_betas,
-            "eps": 1e-10,
-            "weight_decay": 0.0,
-        }  # NOTE: weight decay is hardcoded to 0.0 for AdamW, only used in Muon
-        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
-        adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
-        # Create the Muon optimizer for the linear layers
-        muon_kwargs = {"lr": matrix_lr, "momentum": 0.95, "weight_decay": weight_decay}
-        MuonFactory = DistMuon if ddp else Muon
-        muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)
-        # Combine them the two optimizers into one list
-        optimizers = [adamw_optimizer, muon_optimizer]
-        for opt in optimizers:
-            for group in opt.param_groups:
-                group["initial_lr"] = group["lr"]
-        return optimizers
+        # Muon groups (matrix params, grouped by shape for stacking)
+        for shape in sorted({p.shape for p in matrix_params}):
+            group_params = [p for p in matrix_params if p.shape == shape]
+            param_groups.append(dict(
+                kind='muon', params=group_params, lr=matrix_lr,
+                momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=weight_decay,
+            ))
+
+        Factory = DistMuonAdamW if ddp else MuonAdamW
+        optimizer = Factory(param_groups)
+        for group in optimizer.param_groups:
+            group["initial_lr"] = group["lr"]
+        return optimizer
 
     def forward(
         self,

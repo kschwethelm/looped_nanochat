@@ -114,17 +114,16 @@ print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation ste
 token_bytes = get_token_bytes(device=device)
 
 # Initialize the Optimizer
-optimizers = model.setup_optimizers(
+optimizer = model.setup_optimizer(
     unembedding_lr=args.unembedding_lr,
     embedding_lr=args.embedding_lr,
     matrix_lr=args.matrix_lr,
     weight_decay=args.weight_decay,
 )
-# Override the initial learning rate as a fraction of the base learning rate
-for opt in optimizers:
-    for group in opt.param_groups:
-        group["lr"] = group["lr"] * args.init_lr_frac
-        group["initial_lr"] = group["lr"]
+# Set the initial learning rate as a fraction of the base learning rate
+for group in optimizer.param_groups:
+    group["lr"] = group["lr"] * args.init_lr_frac
+    group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
 base_dir = get_base_dir()
@@ -359,16 +358,14 @@ while True:
         loss.backward()
         x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
-    # step the optimizers
+    # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
-    for opt in optimizers:
-        for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
-            if group.get('kind') == 'muon':
-                group["momentum"] = muon_momentum
-    for opt in optimizers:
-        opt.step()
+    for group in optimizer.param_groups:
+        group["lr"] = group["initial_lr"] * lrm
+        if group.get('kind') == 'muon':
+            group["momentum"] = muon_momentum
+    optimizer.step()
     model.zero_grad(set_to_none=True)
     synchronize()
     t1 = time.time()

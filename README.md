@@ -121,7 +121,6 @@ I've published a number of guides that might contain helpful information:
 │   └── repackage_data_reference.py # Pretraining data shard generation
 ├── nanochat
 │   ├── __init__.py                 # empty
-│   ├── adamw.py                    # Distributed AdamW optimizer
 │   ├── checkpoint_manager.py       # Save/Load model checkpoints
 │   ├── common.py                   # Misc small utilities, quality of life
 │   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
@@ -132,7 +131,7 @@ I've published a number of guides that might contain helpful information:
 │   ├── gpt.py                      # The GPT nn.Module Transformer
 │   ├── logo.svg
 │   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
-│   ├── muon.py                     # Distributed Muon optimizer
+│   ├── optim.py                    # AdamW + Muon optimizer, 1GPU and distributed
 │   ├── report.py                   # Utilities for writing the nanochat Report
 │   ├── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
 │   └── ui.html                     # HTML/CSS/JS for nanochat frontend
