@@ -27,6 +27,7 @@ class MockConfig:
     n_prelude: int = 1
     n_recur_block: int = 1
     n_coda: int = 1
+    train_recur_mean: float = 1.0
 
 
 class MockModel:
@@ -44,7 +45,9 @@ class MockModel:
     def get_device(self):
         return self._device
 
-    def forward(self, ids, kv_cache=None, num_recur=None, warm_start_state=None):
+    def forward(
+        self, ids, kv_cache=None, num_recur=None, warm_start_state=None, kv_cache_mode=None
+    ):
         """Return uniform logits and mock warm_start_state for looped transformer."""
         B, T = ids.shape
         # With FA3, flash_attn_with_kvcache updates cache in-place and we advance position
@@ -209,7 +212,7 @@ def test_multi_sample_first_token_diversity():
         temperature=1.0,
         seed=42,
     )
-    for token_column, token_masks in gen:
+    for token_column, _token_masks in gen:
         first_tokens = token_column  # This is the first (and only) yield
 
     # With uniform distribution and 16 samples, they should NOT all be identical

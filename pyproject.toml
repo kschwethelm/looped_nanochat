@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
+    "flash-attn",
     "ipykernel>=7.1.0",
     "kernels>=0.11.7",
     "matplotlib>=3.10.8",
@@ -34,7 +35,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -78,6 +79,7 @@ torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "gpu" },
 ]
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
