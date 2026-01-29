@@ -10,6 +10,5 @@ eval_bundle/
 .env
 
 # Local setup
-.claude
 wandb/
 logs/
