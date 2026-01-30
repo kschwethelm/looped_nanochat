@@ -19,6 +19,10 @@ Looped Transformer specifics:
 - Warm-start inference: final recurrent state s from token t-1 initializes state for token t (disabled for training)
 - Truncated BPTT: gradients detached for all but last bptt_k recurrences to limit memory/compute
 - Variable recurrence depth: num_recur sampled from distribution during training (mean=train_recur_mean, max=train_recur_max)
+- Early exit: when exit_threshold is set, tokens halt when relative L2 change < threshold (after min 2 iterations)
+  - Per-token tracking: each token position halts independently based on its convergence
+  - Masked update: halted tokens freeze their state, active tokens continue updating
+  - Inference optimization: loop breaks early when all tokens in batch have halted
 - Recurrent state flow: s ← e (init) → s ← recur(inject(e,s)) (loop num_recur times) → coda(s) → output
 """
 
@@ -59,6 +63,9 @@ class GPTConfig:
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
     bptt_k: int = 4  # truncate backprop to last k recurrences
+
+    # Early exit options
+    exit_threshold: float | None = None  # relative L2 threshold for early exit (None = disabled)
 
 
 def norm(x):
@@ -441,6 +448,94 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
+    def _run_recurrent_block(
+        self,
+        e: torch.Tensor,
+        warm_start_state: torch.Tensor | None,
+        cos_sin: tuple[torch.Tensor, torch.Tensor],
+        kv_cache,
+        num_recur: int,
+    ) -> torch.Tensor:
+        """
+        Run the recurrent block num_recur times with input injection.
+
+        Args:
+            e: Prelude output tensor (B, T, n_embd), injected at each recurrence
+            warm_start_state: Optional initial state from previous token generation
+            cos_sin: Rotary embedding (cos, sin) tuple
+            kv_cache: Optional KV cache for inference
+            num_recur: Number of recurrence iterations
+
+        Returns:
+            Final recurrent state s (B, T, n_embd)
+        """
+        B, T, _ = e.shape
+        device = e.device
+        kv_budget = kv_cache.kv_budget if kv_cache is not None else None
+
+        # Initialize recurrent state
+        # If warm_start_state provided, use it; otherwise start from e
+        if warm_start_state is not None:
+            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape
+            if warm_start_state.size(1) != T:
+                s = warm_start_state.expand(-1, T, -1)
+            else:
+                s = warm_start_state
+        else:
+            s = e
+
+        # Early exit: only enabled during inference when threshold is set
+        exit_threshold = self.config.exit_threshold
+        use_early_exit = exit_threshold is not None and not self.training
+        halted = None
+        if use_early_exit:
+            halted = torch.zeros(B, T, dtype=torch.bool, device=device)
+
+        for i in range(num_recur):
+            s_prev = s  # save previous state for convergence check
+            u = self.inject(torch.cat([e, s], dim=-1))
+
+            for j, block in enumerate(self.transformer.recur):
+                if kv_cache is not None:
+                    # Circular indexing based on kv_budget
+                    layer_idx = (
+                        self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
+                    )
+                else:
+                    layer_idx = None
+                u = block(
+                    u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx
+                )
+            s_new = u
+
+            # Early exit logic (inference only): check convergence after at least 2 iterations
+            if use_early_exit and i >= 1:
+                # Compute relative L2 distance per token: ||s_new - s_prev||_2 / ||s_prev||_2
+                delta = torch.norm(s_new - s_prev, dim=-1)  # (B, T)
+                s_prev_norm = torch.norm(s_prev, dim=-1).clamp(min=1e-8)  # avoid div by zero
+                relative_delta = delta / s_prev_norm  # (B, T)
+
+                # Update halt status for tokens that converged
+                newly_halted = relative_delta < exit_threshold
+                halted = halted | newly_halted
+
+                # Masked update: frozen tokens keep old state, active tokens get new state
+                halt_mask = halted.unsqueeze(-1)  # (B, T, 1) for broadcasting
+                s = torch.where(halt_mask, s_prev, s_new)
+
+                # Early break if all tokens halted
+                if halted.all():
+                    break
+            else:
+                s = s_new
+
+            # Truncated BPTT: detach gradients for recurrences before the last bptt_k
+            # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
+            if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
+                s = s.detach()
+
+        return s
+
     def forward(
         self,
         idx,
@@ -453,9 +548,6 @@ class GPT(nn.Module):
         B, T = idx.size()
         if num_recur is None:
             num_recur = int(self.config.train_recur_mean)
-
-        # Get kv_budget from cache if provided (only used during inference with KV cache)
-        kv_budget = kv_cache.kv_budget if kv_cache is not None else None
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert self.cos.size(1) >= T, (
@@ -472,6 +564,9 @@ class GPT(nn.Module):
             self.sin[:, T0 : T0 + T],
         )  # truncate cache to current sequence length
 
+        # Get kv_budget from cache if provided (only used during inference with KV cache)
+        kv_budget = kv_cache.kv_budget if kv_cache is not None else None
+
         # 1. Embedding + norm
         x = self.transformer.wte(idx)
         x = norm(x)
@@ -482,56 +577,19 @@ class GPT(nn.Module):
             x = block(x, cos_sin, self.window_sizes[i], kv_cache, layer_idx)
         e = x  # prelude output, used for injection into each recurrence
 
-        # 3. Initialize recurrent state
-        # If warm_start_state provided, use it; otherwise start from e
-        if warm_start_state is not None:
-            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
-            if warm_start_state.size(1) != T:
-                s = warm_start_state.expand(-1, T, -1)
-            else:
-                s = warm_start_state
-        else:
-            s = e
+        # 3. Recurrent block (run num_recur times)
+        s = self._run_recurrent_block(e, warm_start_state, cos_sin, kv_cache, num_recur)
 
-        # 4. Recurrent block (run num_recur times)
-        for i in range(num_recur):
-            # Input injection: u = inject(concat(e, s))
-            u = self.inject(torch.cat([e, s], dim=-1))
-            # Run recur blocks with KV cache
-            for j, block in enumerate(self.transformer.recur):
-                if kv_cache is not None:
-                    # Circular indexing based on kv_budget
-                    # At iteration i, use cache slot (i % kv_budget)
-                    layer_idx = (
-                        self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
-                    )
-                else:
-                    layer_idx = None
-                u = block(
-                    u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx
-                )
-            # TODO: No normalization? u = norm(u)?
-            s = u  # update recurrent state
-            # Truncated BPTT: detach gradients for recurrences before the last bptt_k
-            # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
-            if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
-                s = s.detach()
-
-        # 5. Coda blocks (run once)
+        # 4. Coda blocks (run once)
         x = s
         for i, block in enumerate(self.transformer.coda):
-            if kv_cache is not None:
-                # Coda comes after all recurrence slots (based on kv_budget)
-                layer_idx = self.config.n_prelude + (kv_budget * self.config.n_recur_block) + i
-            else:
-                layer_idx = None
-            x = block(
-                x,
-                cos_sin,
-                self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i],
-                kv_cache,
-                layer_idx,
+            layer_idx = (
+                None
+                if kv_cache is None
+                else self.config.n_prelude + (kv_budget * self.config.n_recur_block) + i
             )
+            window_size = self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i]
+            x = block(x, cos_sin, window_size, kv_cache, layer_idx)
         x = norm(x)
 
         # Advance KV cache position after all layers are done
