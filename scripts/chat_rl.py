@@ -103,6 +103,18 @@ parser.add_argument(
     "--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation"
 )
 parser.add_argument("--save-every", type=int, default=60, help="save checkpoint every N steps")
+# Recurrence options
+parser.add_argument(
+    "--use-rec-warm-start",
+    action="store_true",
+    help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+)
+parser.add_argument(
+    "--kv-budget",
+    type=int,
+    default=1,
+    help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -176,6 +188,8 @@ def get_batch():
                     top_k=args.top_k,
                     seed=seed,  # must make sure to change the seed for each sampling step
                     num_recur=None,
+                    use_warm_start=args.use_rec_warm_start,
+                    kv_budget=args.kv_budget,
                 )
             generated_token_sequences.extend(generated_token_sequences_batch)
             masks.extend(masks_batch)
@@ -227,6 +241,8 @@ def run_gsm8k_eval(
     max_completion_tokens=256,
     temperature=0.0,
     top_k=50,
+    use_warm_start=False,
+    kv_budget=1,
 ):
     """
     Evaluates GSM8K task and returns a list of records of evaluation outcomes.
@@ -250,6 +266,8 @@ def run_gsm8k_eval(
             temperature=temperature,
             top_k=top_k,
             num_recur=None,
+            use_warm_start=use_warm_start,
+            kv_budget=kv_budget,
         )
         # Check each sample for correctness
         outcomes = []
@@ -317,6 +335,8 @@ for step in range(num_steps):
                 num_samples=args.device_batch_size,
                 max_examples=args.eval_examples,
                 temperature=1.0,
+                use_warm_start=args.use_rec_warm_start,
+                kv_budget=args.kv_budget,
             )
             records = list(records_iter)  # collect all records
         for k in range(1, args.device_batch_size + 1):
