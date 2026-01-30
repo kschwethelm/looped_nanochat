@@ -67,6 +67,8 @@ def generate_with_tracking(
     temperature: float = 0.0,
     top_k: int = 50,
     seed: int = 42,
+    kv_budget: int = 1,
+    use_warm_start: bool = False,
 ) -> tuple[list[int], list[torch.Tensor], str]:
     """
     Generate response while tracking the final token's latent state trajectory.
@@ -95,7 +97,8 @@ def generate_with_tracking(
             top_k=top_k,
             seed=seed,
             num_recur=num_recur,
-            kv_budget=num_recur,
+            kv_budget=kv_budget,
+            use_warm_start=use_warm_start,
         ):
             token = token_column[0]  # batch size is 1
 
@@ -436,6 +439,17 @@ def main():
         action="store_true",
         help="Don't draw arrows on trajectories",
     )
+    parser.add_argument(
+        "--kv-budget",
+        type=int,
+        default=1,
+        help="Fixed KV-cache budget for recurrences (default: 1)",
+    )
+    parser.add_argument(
+        "--use-rec-warm-start",
+        action="store_true",
+        help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+    )
     args = parser.parse_args()
 
     # Initialize compute
@@ -495,6 +509,8 @@ def main():
                 temperature=args.temperature,
                 top_k=args.top_k,
                 seed=args.seed + idx,
+                kv_budget=args.kv_budget,
+                use_warm_start=args.use_rec_warm_start,
             )
 
             print(f"  Generated: {len(generated_tokens)} tokens")
@@ -586,7 +602,7 @@ def main():
             fig.delaxes(axes[idx])
 
     plt.suptitle(
-        f"Latent State Trajectories ({args.n_components}D PCA Projection)",
+        f"Latent State Trajectories ({args.n_components}D PCA Projection, num_recur={num_recur}, kv_budget={args.kv_budget})",
         fontsize=16,
         fontweight="bold",
         y=0.995,
@@ -611,7 +627,8 @@ def main():
     # Save figure
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    output_path = plots_dir / f"latent_trajectories_{args.n_components}d.png"
+    warmstart_suffix = "_warmstart" if args.use_rec_warm_start else ""
+    output_path = plots_dir / f"latent_trajectories_{args.n_components}d_recur{num_recur}_kvbudget{args.kv_budget}{warmstart_suffix}.png"
 
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nVisualization saved to: {output_path}")

@@ -52,6 +52,7 @@ def generate_with_latent_tracking(
     top_k=50,
     seed=42,
     kv_budget=1,
+    use_warm_start=False,
 ):
     """
     Generate response while tracking latent states for ALL tokens.
@@ -84,6 +85,7 @@ def generate_with_latent_tracking(
             seed=seed,
             num_recur=num_recur,
             kv_budget=kv_budget,
+            use_warm_start=use_warm_start,
         ):
             token = token_column[0]  # batch size is 1
 
@@ -117,6 +119,7 @@ def plot_latent_state_distances(
     question: str,
     response: str,
     kv_budget: int = 1,
+    use_warm_start: bool = False,
 ):
     """
     Plot heatmap of L2 distances between consecutive loop steps for each token.
@@ -210,7 +213,8 @@ def plot_latent_state_distances(
     # Save to plots directory
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
-    output_path = plots_dir / f"gsm8k_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}.png"
+    warmstart_suffix = "_warmstart" if use_warm_start else ""
+    output_path = plots_dir / f"gsm8k_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nPlot saved to: {output_path}")
 
@@ -272,6 +276,11 @@ def main():
         default=1,
         help="Fixed KV-cache budget for recurrences (default: 1)",
     )
+    parser.add_argument(
+        "--use-rec-warm-start",
+        action="store_true",
+        help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+    )
     args = parser.parse_args()
 
     # Initialize compute
@@ -322,6 +331,7 @@ def main():
             top_k=args.top_k,
             seed=args.seed,
             kv_budget=args.kv_budget,
+            use_warm_start=args.use_rec_warm_start,
         )
 
     # Decode response
@@ -340,6 +350,7 @@ def main():
             question=question,
             response=response,
             kv_budget=args.kv_budget,
+            use_warm_start=args.use_rec_warm_start,
         )
     else:
         print("No latent states captured for plotting")
