@@ -449,36 +449,13 @@ class GPT(nn.Module):
         loss_reduction="mean",
         num_recur=None,
         warm_start_state=None,
-        kv_cache_mode: str | None = None,
     ):
-        """
-        Args:
-            kv_cache_mode: KV cache strategy for recurrent blocks. Options:
-                - None or "final": Only cache final recurrence (default, memory efficient)
-                - "all": Cache all recurrences (allows attention across all loop states)
-        """
         B, T = idx.size()
         if num_recur is None:
             num_recur = int(self.config.train_recur_mean)
 
-        # Validate and normalize kv_cache_mode
-        if kv_cache_mode is None:
-            kv_cache_mode = "final"
-        assert kv_cache_mode in ("final", "all"), (
-            f"Invalid kv_cache_mode: {kv_cache_mode}. Must be 'final' or 'all'"
-        )
-
-        # Validate KV cache compatibility with current mode and num_recur
-        if kv_cache is not None and hasattr(kv_cache, "mode") and kv_cache.mode is not None:
-            assert kv_cache.mode == kv_cache_mode, (
-                f"KV cache was allocated for '{kv_cache.mode}' mode, but called with '{kv_cache_mode}' mode. "
-                f"Cache structure is incompatible between modes."
-            )
-            if kv_cache.num_recur is not None and kv_cache.mode == "all":
-                assert kv_cache.num_recur == num_recur, (
-                    f"KV cache was allocated for num_recur={kv_cache.num_recur} in 'all' mode, "
-                    f"but called with num_recur={num_recur}. Cache structure is incompatible."
-                )
+        # Get kv_budget from cache if provided (only used during inference with KV cache)
+        kv_budget = kv_cache.kv_budget if kv_cache is not None else None
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
         assert self.cos.size(1) >= T, (
@@ -523,12 +500,11 @@ class GPT(nn.Module):
             # Run recur blocks with KV cache
             for j, block in enumerate(self.transformer.recur):
                 if kv_cache is not None:
-                    if kv_cache_mode == "all":
-                        # Unique cache slot for this (iteration, block) pair
-                        layer_idx = self.config.n_prelude + (i * self.config.n_recur_block) + j
-                    else:  # "final" mode
-                        # Reuse same cache slots (only final iteration persists)
-                        layer_idx = self.config.n_prelude + j
+                    # Circular indexing based on kv_budget
+                    # At iteration i, use cache slot (i % kv_budget)
+                    layer_idx = (
+                        self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
+                    )
                 else:
                     layer_idx = None
                 u = block(
@@ -545,11 +521,8 @@ class GPT(nn.Module):
         x = s
         for i, block in enumerate(self.transformer.coda):
             if kv_cache is not None:
-                if kv_cache_mode == "all":
-                    # Coda comes after all recurrence slots
-                    layer_idx = self.config.n_prelude + (num_recur * self.config.n_recur_block) + i
-                else:  # "final" mode
-                    layer_idx = self.config.n_prelude + self.config.n_recur_block + i
+                # Coda comes after all recurrence slots (based on kv_budget)
+                layer_idx = self.config.n_prelude + (kv_budget * self.config.n_recur_block) + i
             else:
                 layer_idx = None
             x = block(

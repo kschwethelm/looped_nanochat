@@ -1,5 +1,9 @@
 # Research Code - Looped LLMs based on nanochat
 
+## Core Idea
+
+This project develops a **looped (depth-recurrent) transformer architecture** that scales test-time compute by iterating a recurrent block in latent space, rather than producing more tokens (like Chain-of-Thought). This allows the model to "think" in continuous high-dimensional space before emitting each token.
+
 ## Philosophy
 Research code optimized for rapid iteration and debugging:
 - Simple, hackable implementations > frameworks
@@ -9,6 +13,8 @@ Research code optimized for rapid iteration and debugging:
 ## Code Standards
 - Type hints on all signatures (modern syntax: `str | None`, `list[int]`)
 - Self-documenting names > comments
+- Use `pathlib.Path` for file paths (not `os.path`)
+- Save plots to `get_base_dir() + "/plots"` (not `plt.show()`)
 - Run ruff after changes: `uv run ruff format . && uv run ruff check --fix .`
 
 ## Conventions

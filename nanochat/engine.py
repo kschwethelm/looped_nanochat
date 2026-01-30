@@ -119,16 +119,16 @@ class KVCache:
         num_layers,
         device,
         dtype,
-        mode=None,
         num_recur=None,
+        kv_budget=1,
     ):
         self.batch_size = batch_size
         self.max_seq_len = seq_len
         self.n_layers = num_layers
         self.n_heads = num_heads
         self.head_dim = head_dim
-        self.mode = mode  # Track cache mode: "final", "all", or None
         self.num_recur = num_recur  # Track num_recur used during cache creation
+        self.kv_budget = kv_budget  # Fixed KV-cache budget for recurrences (default=1)
         # Pre-allocate cache tensors: (n_layers, B, T, H, D)
         self.k_cache = torch.zeros(
             num_layers,
@@ -234,24 +234,19 @@ class Engine:
         seed=42,
         num_recur=None,
         use_warm_start=False,
-        kv_cache_mode: str | None = None,
+        kv_budget: int = 1,
     ):
         """
         Generate tokens with KV caching and optional batch sampling.
 
         Args:
-            kv_cache_mode: KV cache strategy for recurrent blocks:
-                - None or "final": Only cache final recurrence (default, memory efficient)
-                - "all": Cache all recurrences (allows attention across all loop states)
+            kv_budget: Fixed KV-cache budget for recurrences (default=1).
+                At iteration i, reads/writes cache entry i mod kv_budget.
+                Budget=1 caches only final recurrence (memory efficient).
+                Budget=num_recur caches all recurrences (allows attention across all loop states).
         """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
-
-        # Normalize kv_cache_mode
-        if kv_cache_mode is None:
-            kv_cache_mode = "final"
-        assert kv_cache_mode in ("final", "all"), (
-            f"Invalid kv_cache_mode: {kv_cache_mode}. Must be 'final' or 'all'"
-        )
+        assert kv_budget >= 1, f"kv_budget must be >= 1, got {kv_budget}"
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
         # Currently the repo assumes that cuda -> bfloat16 and everything else -> float32.
@@ -275,13 +270,9 @@ class Engine:
         m = self.model.config
         # Determine number of recurrences for cache allocation
         cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
-        # Calculate effective number of layers based on caching mode
-        if kv_cache_mode == "all":
-            # Allocate cache for all recurrences: prelude + (recur_block * num_recur) + coda
-            effective_num_layers = m.n_prelude + (m.n_recur_block * cache_num_recur) + m.n_coda
-        else:  # "final" mode
-            # Allocate cache only for final recurrence: prelude + recur_block + coda
-            effective_num_layers = m.n_prelude + m.n_recur_block + m.n_coda
+        # Calculate effective number of layers based on KV budget
+        # Budget determines how many recurrence iterations we cache: prelude + (recur_block * kv_budget) + coda
+        effective_num_layers = m.n_prelude + (m.n_recur_block * kv_budget) + m.n_coda
         kv_model_kwargs = {
             "num_heads": m.n_kv_head,
             "head_dim": m.n_embd // m.n_head,
@@ -292,13 +283,13 @@ class Engine:
             seq_len=len(tokens),
             device=device,
             dtype=dtype,
-            mode=kv_cache_mode,
             num_recur=cache_num_recur,
+            kv_budget=kv_budget,
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
         logits, warm_start_state = self.model.forward(
-            ids, kv_cache=kv_cache_prefill, num_recur=num_recur, kv_cache_mode=kv_cache_mode
+            ids, kv_cache=kv_cache_prefill, num_recur=num_recur
         )
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
         warm_start_state = warm_start_state[:, -1:, :].expand(
@@ -314,8 +305,8 @@ class Engine:
             seq_len=kv_length_hint,
             device=device,
             dtype=dtype,
-            mode=kv_cache_mode,
             num_recur=cache_num_recur,
+            kv_budget=kv_budget,
             **kv_model_kwargs,
         )
         kv_cache_decode.prefill(kv_cache_prefill)
@@ -383,7 +374,6 @@ class Engine:
                 kv_cache=kv_cache_decode,
                 num_recur=num_recur,
                 warm_start_state=warm_start_state if use_warm_start else None,
-                kv_cache_mode=kv_cache_mode,
             )
             logits = logits[:, -1, :]  # (B, vocab_size)
 

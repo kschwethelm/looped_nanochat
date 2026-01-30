@@ -15,11 +15,9 @@ import os
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import argparse
-import math
 import time
 from contextlib import nullcontext
 
-import numpy as np
 import torch
 import wandb
 
@@ -33,6 +31,7 @@ from nanochat.common import (
     get_peak_flops,
     print0,
     print_banner,
+    sample_poisson_lognormal_recurrence,
 )
 from nanochat.dataloader import (
     tokenizing_distributed_data_loader_bos_bestfit,
@@ -605,12 +604,11 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         # Sample number of recurrences from Poisson log-normal distribution (per paper Section 3.3)
-        # τ ~ N(log(r̄) - ½σ², σ) where σ=0.5, then r ~ Poisson(e^τ) + 1
-        sigma = 0.5
-        r_bar = model_config.train_recur_mean
-        tau = np.random.normal(math.log(r_bar) - 0.5 * sigma**2, sigma)
-        num_recur = np.random.poisson(math.exp(tau)) + 1
-        num_recur = max(1, min(num_recur, model_config.train_recur_max))  # clamp to [1, max]
+        num_recur = sample_poisson_lognormal_recurrence(
+            mean_recur=model_config.train_recur_mean,
+            sigma=0.5,
+            max_recur=model_config.train_recur_max,
+        )
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging

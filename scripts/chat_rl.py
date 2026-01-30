@@ -33,6 +33,7 @@ from nanochat.common import (
     compute_init,
     get_base_dir,
     print0,
+    sample_poisson_lognormal_recurrence,
 )
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
@@ -355,9 +356,15 @@ for step in range(num_steps):
             targets = targets_all[b0:b1]
             rewards = rewards_all[b0:b1]
             advantages = advantages_all[b0:b1]
+            # Sample number of recurrences from Poisson log-normal distribution
+            num_recur = sample_poisson_lognormal_recurrence(
+                mean_recur=model.config.train_recur_mean,
+                sigma=0.5,
+                max_recur=model.config.train_recur_max,
+            )
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
             with autocast_ctx:
-                logp = -model(inputs, targets, loss_reduction="none", num_recur=None).view_as(
+                logp = -model(inputs, targets, loss_reduction="none", num_recur=num_recur).view_as(
                     inputs
                 )  # (B, T)
             # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.

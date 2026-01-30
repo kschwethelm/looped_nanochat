@@ -49,12 +49,11 @@ parser.add_argument(
     help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
 )
 parser.add_argument(
-    "-kv",
-    "--kv-cache-mode",
-    type=str,
-    default="final",
-    choices=["final", "all"],
-    help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
+    "-kb",
+    "--kv-budget",
+    type=int,
+    default=1,
+    help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
 )
 args = parser.parse_args()
 
@@ -132,7 +131,7 @@ while True:
         "temperature": args.temperature,
         "top_k": args.top_k,
         "use_warm_start": args.use_rec_warm_start,
-        "kv_cache_mode": args.kv_cache_mode,
+        "kv_budget": args.kv_budget,
     }
     response_tokens = []
     print("\nAssistant: ", end="", flush=True)

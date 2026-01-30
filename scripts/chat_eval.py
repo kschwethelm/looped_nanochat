@@ -46,7 +46,7 @@ def run_generative_eval(
     max_problems=None,
     num_recur=None,
     use_warm_start=False,
-    kv_cache_mode="final",
+    kv_budget=1,
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
@@ -69,7 +69,7 @@ def run_generative_eval(
             top_k=top_k,
             num_recur=num_recur,
             use_warm_start=use_warm_start,
-            kv_cache_mode=kv_cache_mode,
+            kv_budget=kv_budget,
         )
         # Decode the completions as text
         prefix_length = len(encoded_prompt)
@@ -211,7 +211,7 @@ def run_chat_eval(
     max_problems=None,
     num_recur=None,
     use_warm_start=False,
-    kv_cache_mode="final",
+    kv_budget=1,
 ):
     # Create the evaluation object
     task_module = {
@@ -237,7 +237,7 @@ def run_chat_eval(
             max_problems=max_problems,
             num_recur=num_recur,
             use_warm_start=use_warm_start,
-            kv_cache_mode=kv_cache_mode,
+            kv_budget=kv_budget,
         )
     elif task_object.eval_type == "categorical":
         acc = run_categorical_eval(
@@ -303,12 +303,11 @@ if __name__ == "__main__":
         help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
     )
     parser.add_argument(
-        "-kv",
-        "--kv-cache-mode",
-        type=str,
-        default="final",
-        choices=["final", "all"],
-        help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
+        "-kb",
+        "--kv-budget",
+        type=int,
+        default=1,
+        help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
     )
     args = parser.parse_args()
 
@@ -369,7 +368,7 @@ if __name__ == "__main__":
                     max_problems=args.max_problems,
                     num_recur=num_recur,
                     use_warm_start=args.use_rec_warm_start,
-                    kv_cache_mode=args.kv_cache_mode,
+                    kv_budget=args.kv_budget,
                 )
                 results[task_name] = acc
                 print0(f"{task_name} accuracy: {100 * acc:.2f}%")
