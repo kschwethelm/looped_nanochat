@@ -19,12 +19,13 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 import argparse
 import itertools
 import os
+from collections.abc import Generator
 from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-import wandb
 
+import wandb
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
     DummyWandb,
@@ -36,6 +37,7 @@ from nanochat.common import (
     sample_poisson_lognormal_recurrence,
 )
 from nanochat.engine import Engine
+from nanochat.report import get_report
 from tasks.gsm8k import GSM8K
 
 # -----------------------------------------------------------------------------
@@ -152,9 +154,14 @@ val_task = GSM8K(subset="main", split="test")
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
 print0(f"Calculated number of steps: {num_steps}")
 
+# Shared num_recur for the current training step (maintains on-policy consistency)
+current_step_num_recur = None
+
 
 @torch.no_grad()
-def get_batch():
+def get_batch() -> Generator[
+    tuple[list[list[int]], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None, None
+]:
     assistant_end = tokenizer.encode_special(
         "<|assistant_end|>"
     )  # ok to use this token, it's only for padding and isn't used in the loss.
@@ -187,7 +194,7 @@ def get_batch():
                     temperature=args.temperature,
                     top_k=args.top_k,
                     seed=seed,  # must make sure to change the seed for each sampling step
-                    num_recur=None,
+                    num_recur=current_step_num_recur,  # use the step's num_recur for on-policy consistency
                     use_warm_start=args.use_rec_warm_start,
                     kv_budget=args.kv_budget,
                 )
@@ -233,17 +240,17 @@ def get_batch():
 # -----------------------------------------------------------------------------
 # Simple evaluation loop for GSM8K pass@k
 def run_gsm8k_eval(
-    task,
+    task: GSM8K,
     tokenizer,
-    engine,
-    max_examples=None,
-    num_samples=1,
-    max_completion_tokens=256,
-    temperature=0.0,
-    top_k=50,
-    use_warm_start=False,
-    kv_budget=1,
-):
+    engine: Engine,
+    max_examples: int | None = None,
+    num_samples: int = 1,
+    max_completion_tokens: int = 256,
+    temperature: float = 0.0,
+    top_k: int = 50,
+    use_warm_start: bool = False,
+    kv_budget: int = 1,
+) -> Generator[dict, None, None]:
     """
     Evaluates GSM8K task and returns a list of records of evaluation outcomes.
     In a distributed setting, all ranks cooperate but this function will NOT
@@ -303,8 +310,8 @@ for opt in optimizers:
 
 
 # Learning rate scheduler: simple rampdown to zero over num_steps
-def get_lr_multiplier(it):
-    lrm = 1.0 - it / num_steps
+def get_lr_multiplier(it: int) -> float:
+    lrm: float = 1.0 - it / num_steps
     return lrm
 
 
@@ -321,6 +328,13 @@ print0(f"Calculated examples per rank: {examples_per_rank}")
 # Kick off the training loop
 batch_iterator = get_batch()
 for step in range(num_steps):
+    # Sample num_recur for this entire step (maintains on-policy consistency)
+    current_step_num_recur = sample_poisson_lognormal_recurrence(
+        mean_recur=model.config.train_recur_mean,
+        sigma=0.5,
+        max_recur=model.config.train_recur_max,
+    )
+
     # Evaluate the model once in a while and log to wandb
     if step % args.eval_every == 0:
         model.eval()
@@ -376,17 +390,12 @@ for step in range(num_steps):
             targets = targets_all[b0:b1]
             rewards = rewards_all[b0:b1]
             advantages = advantages_all[b0:b1]
-            # Sample number of recurrences from Poisson log-normal distribution
-            num_recur = sample_poisson_lognormal_recurrence(
-                mean_recur=model.config.train_recur_mean,
-                sigma=0.5,
-                max_recur=model.config.train_recur_max,
-            )
+            # Use the same num_recur that was used for rollout generation (on-policy consistency)
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
             with autocast_ctx:
-                logp = -model(inputs, targets, loss_reduction="none", num_recur=num_recur).view_as(
-                    inputs
-                )  # (B, T)
+                logp = -model(
+                    inputs, targets, loss_reduction="none", num_recur=current_step_num_recur
+                ).view_as(inputs)  # (B, T)
             # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.
             pg_obj = (logp * advantages.unsqueeze(-1)).sum()
             # normalize by the number of valid tokens, number of passes, and examples_per_rank
@@ -416,13 +425,14 @@ for step in range(num_steps):
         mean_reward = mean_reward_tensor.item()
         mean_sequence_length = mean_sequence_length_tensor.item()
     print0(
-        f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}"
+        f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f} | num_recur: {current_step_num_recur}"
     )
     wandb_run.log(
         {
             "step": step,
             "reward": mean_reward,
             "sequence_length": mean_sequence_length,
+            "num_recur": current_step_num_recur,
         }
     )
 
@@ -464,8 +474,6 @@ for step in range(num_steps):
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
-from nanochat.report import get_report
-
 get_report().log(
     section="Chat RL",
     data=[
