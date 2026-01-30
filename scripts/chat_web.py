@@ -101,12 +101,11 @@ parser.add_argument(
     help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
 )
 parser.add_argument(
-    "-kv",
-    "--kv-cache-mode",
-    type=str,
-    default="final",
-    choices=["final", "all"],
-    help="KV cache mode: 'final' (only cache final recurrence, default) or 'all' (cache all recurrences)",
+    "-kb",
+    "--kv-budget",
+    type=int,
+    default=1,
+    help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
 )
 args = parser.parse_args()
 
@@ -314,7 +313,7 @@ async def generate_stream(
     top_k=None,
     num_recur=None,
     use_warm_start=None,
-    kv_cache_mode=None,
+    kv_budget=None,
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
@@ -322,7 +321,7 @@ async def generate_stream(
     top_k = top_k if top_k is not None else args.top_k
     num_recur = num_recur if num_recur is not None else args.num_recur
     use_warm_start = use_warm_start if use_warm_start is not None else args.use_rec_warm_start
-    kv_cache_mode = kv_cache_mode if kv_cache_mode is not None else args.kv_cache_mode
+    kv_budget = kv_budget if kv_budget is not None else args.kv_budget
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
@@ -342,7 +341,7 @@ async def generate_stream(
             num_recur=num_recur,
             seed=random.randint(0, 2**31 - 1),
             use_warm_start=use_warm_start,
-            kv_cache_mode=kv_cache_mode,
+            kv_budget=kv_budget,
         ):
             token = token_column[0]
 

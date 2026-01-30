@@ -12,3 +12,4 @@ eval_bundle/
 # Local setup
 wandb/
 logs/
+knowledge/

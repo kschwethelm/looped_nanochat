@@ -45,9 +45,7 @@ class MockModel:
     def get_device(self):
         return self._device
 
-    def forward(
-        self, ids, kv_cache=None, num_recur=None, warm_start_state=None, kv_cache_mode=None
-    ):
+    def forward(self, ids, kv_cache=None, num_recur=None, warm_start_state=None):
         """Return uniform logits and mock warm_start_state for looped transformer."""
         B, T = ids.shape
         # With FA3, flash_attn_with_kvcache updates cache in-place and we advance position

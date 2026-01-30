@@ -28,6 +28,7 @@ from nanochat.common import (
     compute_init,
     get_base_dir,
     print0,
+    sample_poisson_lognormal_recurrence,
 )
 from nanochat.engine import Engine
 from scripts.chat_eval import run_chat_eval
@@ -252,8 +253,14 @@ for step in range(num_iterations):
         losses = []
         for _ in range(args.eval_steps):
             val_inputs, val_targets = next(val_loader)
+            # Sample number of recurrences from Poisson log-normal distribution
+            num_recur = sample_poisson_lognormal_recurrence(
+                mean_recur=model.config.train_recur_mean,
+                sigma=0.5,
+                max_recur=model.config.train_recur_max,
+            )
             with torch.no_grad(), autocast_ctx:
-                loss = model(val_inputs, val_targets, num_recur=None)
+                loss = model(val_inputs, val_targets, num_recur=num_recur)
             losses.append(loss)
         val_loss = torch.stack(losses).mean()  # average over eval_steps
         if ddp:
@@ -307,8 +314,14 @@ for step in range(num_iterations):
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)
+        # Sample number of recurrences from Poisson log-normal distribution
+        num_recur = sample_poisson_lognormal_recurrence(
+            mean_recur=model.config.train_recur_mean,
+            sigma=0.5,
+            max_recur=model.config.train_recur_max,
+        )
         with autocast_ctx:
-            loss = model(train_inputs, train_targets, num_recur=None)
+            loss = model(train_inputs, train_targets, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()  # accumulate the gradient

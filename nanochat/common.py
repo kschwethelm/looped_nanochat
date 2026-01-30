@@ -3,10 +3,12 @@ Common utilities for nanochat.
 """
 
 import logging
+import math
 import os
 import re
 import urllib.request
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from filelock import FileLock
@@ -113,16 +115,52 @@ def print0(s="", **kwargs):
 def print_banner():
     # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
     banner = """
-                                                       █████                █████
-                                                      ░░███                ░░███
-     ████████    ██████   ████████    ██████   ██████  ░███████    ██████  ███████
-    ░░███░░███  ░░░░░███ ░░███░░███  ███░░███ ███░░███ ░███░░███  ░░░░░███░░░███░
-     ░███ ░███   ███████  ░███ ░███ ░███ ░███░███ ░░░  ░███ ░███   ███████  ░███
-     ░███ ░███  ███░░███  ░███ ░███ ░███ ░███░███  ███ ░███ ░███  ███░░███  ░███ ███
-     ████ █████░░████████ ████ █████░░██████ ░░██████  ████ █████░░███████  ░░█████
-    ░░░░ ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░   ░░░░░░  ░░░░ ░░░░░  ░░░░░░░░   ░░░░░
+     ████                                           █████                            
+    ░░███                                          ░░███                             
+     ░███   ██████   ██████  ████████   ██████   ███████                             
+     ░███  ███░░███ ███░░███░░███░░███ ███░░███ ███░░███                             
+     ░███ ░███ ░███░███ ░███ ░███ ░███░███████ ░███ ░███                             
+     ░███ ░███ ░███░███ ░███ ░███ ░███░███░░░  ░███ ░███                             
+     █████░░██████ ░░██████  ░███████ ░░██████ ░░████████                            
+    ░░░░░  ░░░░░░   ░░░░░░   ░███░░░   ░░░░░░   ░░░░░░░░                             
+                             ░███                                                    
+                             █████                                                   
+                            ░░░░░                                                    
+                                                       █████                 █████   
+                                                       ░░███                 ░░███    
+     ████████    ██████   ████████    ██████   ██████  ░███████    ██████   ███████  
+    ░░███░░███  ░░░░░███ ░░███░░███  ███░░███ ███░░███ ░███░░███  ░░░░░███ ░░░███░   
+     ░███ ░███   ███████  ░███ ░███ ░███ ░███░███ ░░░  ░███ ░███   ███████   ░███    
+     ░███ ░███  ███░░███  ░███ ░███ ░███ ░███░███  ███ ░███ ░███  ███░░███   ░███ ███
+     ████ █████░░████████ ████ █████░░██████ ░░██████  ████ █████░░████████  ░░█████ 
+    ░░░░ ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░   ░░░░░░  ░░░░ ░░░░░  ░░░░░░░░    ░░░░░  
     """
     print0(banner)
+
+
+def sample_poisson_lognormal_recurrence(
+    mean_recur: float, sigma: float = 0.5, max_recur: int | None = None
+) -> int:
+    """
+    Sample number of recurrences from Poisson log-normal distribution.
+
+    This distribution creates a heavy-tailed sampling scheme for recurrence depth,
+    as described in Huginn paper (arXiv:2502.05171, Section 3.3).
+
+    The distribution is: τ ~ N(log(r̄) - ½σ², σ), then r ~ Poisson(e^τ) + 1
+
+    Args:
+        mean_recur: Mean number of recurrences (r̄)
+        sigma: Standard deviation of the log-normal component (default: 0.5)
+        max_recur: Optional maximum recurrence value for clamping
+
+    Returns:
+        Sampled number of recurrences, clamped to [1, max_recur] if max_recur is provided
+    """
+    tau = np.random.normal(math.log(mean_recur) - 0.5 * sigma**2, sigma)
+    num_recur = np.random.poisson(math.exp(tau)) + 1
+    num_recur = max(1, min(num_recur, max_recur)) if max_recur is not None else max(1, num_recur)
+    return int(num_recur)
 
 
 def is_ddp_requested() -> bool:
