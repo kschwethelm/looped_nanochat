@@ -1,4 +1,4 @@
-# nanochat
+# looped nanochat
 
 ![nanochat logo](dev/nanochat.png)
 
