@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=looped_nanochat_chat_sft
-#SBATCH --output=logs/chat_sft/%A_%a.out
-#SBATCH --error=logs/chat_sft/%A_%a.err
+#SBATCH --job-name=looped_nanochat_mid_train
+#SBATCH --output=logs/mid_train/%A_%a.out
+#SBATCH --error=logs/mid_train/%A_%a.err
 #SBATCH --time=05:00:00
 #SBATCH --nodes=1
 #SBATCH -p mcml-hgx-h100-94x4
@@ -28,13 +28,13 @@ export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/nanochat"
 NPROC_PER_NODE=1
 
 # Run chat evaluation
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft \
-    -- --source mid  --model-tag d20 --output-tag d20_def \
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train \
+    -- --model-tag d20 --output-tag d20_def \
     --device-batch-size 32 \
     --run default_cfg
 
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
-    -- -i sft -g d20_def \
+    -- -i mid -g d20_def \
     --batch-size 32 \
     --kv-budget 1 \
     --use-rec-warm-start

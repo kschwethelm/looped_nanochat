@@ -24,8 +24,8 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-
 import wandb
+
 from nanochat.checkpoint_manager import load_model, save_checkpoint
 from nanochat.common import (
     DummyWandb,
@@ -56,6 +56,9 @@ parser.add_argument(
 )
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument(
+    "--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)"
+)
 # Training horizon
 parser.add_argument("--num-epochs", type=int, default=1, help="number of epochs over GSM8K")
 # Batch sizes / sampling
@@ -455,9 +458,7 @@ for step in range(num_steps):
     if master_process and ((step > 0 and step % args.save_every == 0) or step == num_steps - 1):
         base_dir = get_base_dir()
         depth = model.config.n_layer
-        output_dirname = (
-            args.model_tag if args.model_tag else f"d{depth}"
-        )  # base the model tag on the depth of the base model
+        output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
         model_config_kwargs = (
             model.config.__dict__

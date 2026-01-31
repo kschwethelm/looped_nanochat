@@ -14,6 +14,7 @@ import os
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
+from collections.abc import Generator
 from contextlib import nullcontext
 
 import torch
@@ -31,6 +32,7 @@ from nanochat.common import (
     sample_poisson_lognormal_recurrence,
 )
 from nanochat.engine import Engine
+from nanochat.report import get_report
 from scripts.chat_eval import run_chat_eval
 from tasks.arc import ARC
 from tasks.common import TaskMixture
@@ -55,6 +57,9 @@ parser.add_argument(
 )
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument(
+    "--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)"
+)
 # Training horizon
 parser.add_argument("--num-epochs", type=int, default=1, help="number of epochs")
 parser.add_argument(
@@ -160,13 +165,17 @@ val_ds = SmolTalk(
 # DataLoader
 
 
-def sft_data_generator(dataset, batch_size):
+def sft_data_generator(
+    dataset, batch_size: int
+) -> Generator[tuple[torch.Tensor, torch.Tensor], None, None]:
     pad_token_id = tokenizer.encode_special(
         "<|assistant_end|>"
     )  # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
 
     # prepares a list of tokenized conversations into a batch and yields
-    def collate_and_yield(batch):
+    def collate_and_yield(
+        batch: list[tuple[list[int], list[int]]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         nrows = len(batch)
         ncols = max(len(ids) for ids, mask in batch) - 1  # seq of n creates inputs/targets of n-1
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
@@ -214,7 +223,11 @@ if args.num_iterations == -1:
 else:
     num_iterations = args.num_iterations
 train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=args.device_batch_size)
+
+
+def build_val_loader() -> Generator[tuple[torch.Tensor, torch.Tensor], None, None]:
+    return sft_data_generator(val_ds, batch_size=args.device_batch_size)
+
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -236,7 +249,7 @@ for opt in optimizers:
 
 
 # Learning rate scheduler
-def get_lr_multiplier(it):
+def get_lr_multiplier(it: int) -> float:
     lrm = 1.0 - it / num_iterations
     return lrm
 
@@ -253,14 +266,8 @@ for step in range(num_iterations):
         losses = []
         for _ in range(args.eval_steps):
             val_inputs, val_targets = next(val_loader)
-            # Sample number of recurrences from Poisson log-normal distribution
-            num_recur = sample_poisson_lognormal_recurrence(
-                mean_recur=model.config.train_recur_mean,
-                sigma=0.5,
-                max_recur=model.config.train_recur_max,
-            )
             with torch.no_grad(), autocast_ctx:
-                loss = model(val_inputs, val_targets, num_recur=num_recur)
+                loss = model(val_inputs, val_targets)
             losses.append(loss)
         val_loss = torch.stack(losses).mean()  # average over eval_steps
         if ddp:
@@ -312,7 +319,7 @@ for step in range(num_iterations):
 
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
-    for micro_step in range(grad_accum_steps):
+    for _micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)
         # Sample number of recurrences from Poisson log-normal distribution
         num_recur = sample_poisson_lognormal_recurrence(
@@ -360,7 +367,7 @@ for step in range(num_iterations):
 if master_process:
     base_dir = get_base_dir()
     depth = model.config.n_layer
-    output_dirname = args.model_tag if args.model_tag else f"d{depth}"  # e.g. d12
+    output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
     checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
     model_config_kwargs = (
         model.config.__dict__
@@ -379,8 +386,6 @@ if master_process:
     )
     print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
-# Log to report
-from nanochat.report import get_report
 
 get_report().log(
     section="Chat SFT",

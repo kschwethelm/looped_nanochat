@@ -28,6 +28,7 @@ from nanochat.common import (
     compute_init,
     get_base_dir,
     print0,
+    sample_poisson_lognormal_recurrence,
 )
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.tokenizer import get_token_bytes
@@ -51,6 +52,9 @@ parser.add_argument("--dtype", type=str, default="bfloat16", help="float32|bfloa
 # Model loading
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument(
+    "--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)"
+)
 # Training horizon
 parser.add_argument(
     "--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)"
@@ -299,8 +303,11 @@ def mid_data_generator_bos_bestfit(split, buffer_size=100):
 
 
 train_loader = mid_data_generator_bos_bestfit("train")
-build_val_loader = lambda: mid_data_generator_bos_bestfit("val")
 progress = 0  # will go from 0 to 1 over the course of the epoch
+
+
+def build_val_loader():
+    return mid_data_generator_bos_bestfit("val")
 
 
 # Learning rate scheduler
@@ -357,7 +364,7 @@ while True:
 
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not args.dry_run:
-        output_dirname = args.model_tag if args.model_tag else f"d{depth}"  # e.g. d12
+        output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
         save_checkpoint(
             checkpoint_dir,
@@ -389,9 +396,15 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
-    for micro_step in range(grad_accum_steps):
+    for _micro_step in range(grad_accum_steps):
+        # Sample number of recurrences from Poisson log-normal distribution
+        num_recur = sample_poisson_lognormal_recurrence(
+            mean_recur=model.config.train_recur_mean,
+            sigma=0.5,
+            max_recur=model.config.train_recur_max,
+        )
         with autocast_ctx:
-            loss = model(x, y, num_recur=None)
+            loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()

@@ -29,14 +29,14 @@ NPROC_PER_NODE=1
 
 # Run chat evaluation
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_rl \
-    -- --source sft --model-tag d20_default \
+    -- --source sft --model-tag d20 --output-tag d20_def \
     --device-batch-size 16 \
     --kv-budget 1 \
     --use-rec-warm-start \
     --run default
 
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
-    -- -i rl -g d20_default \
+    -- -i rl -g d20_def \
     --batch_size 32 \
     --kv-budget 1 \
     --use-rec-warm-start \
