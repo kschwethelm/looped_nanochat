@@ -165,7 +165,7 @@ parser.add_argument(
 parser.add_argument(
     "--warmdown-ratio",
     type=float,
-    default=0.4,
+    default=0.5,
     help="ratio of iterations for LR warmdown",
 )
 parser.add_argument(
