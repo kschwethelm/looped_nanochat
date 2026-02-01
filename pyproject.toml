@@ -64,6 +64,7 @@ ignore = [
     "B905",  # zip without explicit strict parameter
     "C408",  # allow dict() instead of {} (upstream compatibility)
     "C401",  # allow set() with generator (upstream compatibility)
+    "SIM108",  # allow if-else instead of ternary operator
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -67,11 +67,7 @@ parser.add_argument("--init-lr-frac", type=float, default=1.0, help="initial LR 
 parser.add_argument("--eval-every", type=int, default=150, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=20 * 524288, help="number of tokens to evaluate val loss on")
 # Recurrence
-parser.add_argument(
-    "--no-sample-recur",
-    action="store_true",
-    help="disable sampling num_recur; use fixed train_recur_mean instead",
-)
+parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use model default")
 # Output
 parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
 args = parser.parse_args()
@@ -99,7 +95,8 @@ if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_s
         f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?"
     )
 orig_model = model
-model = torch.compile(model, dynamic=False)
+# Use dynamic=False when sample_recur is enabled (varying num_recur causes recompilation otherwise)
+model = torch.compile(model, dynamic=None if args.no_sample_recur else False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len  # tokens per iteration for a single rank
@@ -349,7 +346,7 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
-    for micro_step in range(grad_accum_steps):
+    for _micro_step in range(grad_accum_steps):
         # Sample number of recurrences from Poisson log-normal distribution
         # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
         if args.no_sample_recur:
