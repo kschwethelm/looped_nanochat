@@ -16,15 +16,18 @@ LABEL="feb1"
 
 FLOPS_BUDGETS=(
     1e18
-    3e18
-    6e18
+    2.15e18
+    4.64e18
+    1e19
 )
-# Discrete model configs
-DEPTHS=(          6    8    10   12   14   16)
-N_PRELUDES=(      1    1    1    2    1    2)
-N_RECUR_BLOCKS=(  2    2    2    2    3    3)
-N_CODAS=(         1    1    1    2    1    2)
-N_RECURS=(      2    3    4    4    4    4)
+# Discrete model configs - fixed architecture, varying size (width = size * 64)
+# Fixed architecture: 2 prelude + 4×4 recur + 2 coda = 20 effective layers
+SIZES=(            8  10  12  14  16  18  20)
+DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32)  # scaled ~inversely with params
+N_PRELUDE=2
+N_RECUR_BLOCK=4
+N_CODA=2
+N_RECUR=4
 
 NPROC_PER_NODE=1 # Number of processes/GPUs to use
 WANDB_RUN="${WANDB_RUN:-scaling_${LABEL}}"
@@ -48,7 +51,7 @@ RESULTS_FILE="$RESULTS_DIR/results.csv"
 
 # Write CSV header only if file doesn't exist
 if [ ! -f "$RESULTS_FILE" ]; then
-    echo "flops_budget,depth,model_dim,num_params,num_scaling_params,num_iterations,tokens_trained,param_data_ratio,val_bpb,core_score,train_time_sec" > "$RESULTS_FILE"
+    echo "flops_budget,size,model_dim,num_params,num_scaling_params,num_iterations,tokens_trained,param_data_ratio,val_bpb,core_score,train_time_sec" > "$RESULTS_FILE"
 fi
 
 log() {
@@ -58,8 +61,8 @@ log() {
 # Check if a run already exists in results CSV
 run_exists() {
     local flops=$1
-    local depth=$2
-    grep -q "^${flops},${depth}," "$RESULTS_FILE" 2>/dev/null
+    local size=$2
+    grep -q "^${flops},${size}," "$RESULTS_FILE" 2>/dev/null
 }
 
 # =============================================================================
@@ -71,19 +74,20 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
     log "Compute budget: $flops FLOPs"
     log "=============================================="
 
-    for i in "${!DEPTHS[@]}"; do
-        d="${DEPTHS[$i]}"
+    for i in "${!SIZES[@]}"; do
+        s="${SIZES[$i]}"
+        batch_size="${DEVICE_BATCH_SIZES[$i]}"
 
         # Skip if already completed
-        if run_exists "$flops" "$d"; then
-            log "Skipping d=$d at $flops FLOPs (already in results)"
+        if run_exists "$flops" "$s"; then
+            log "Skipping s=$s at $flops FLOPs (already in results)"
             continue
         fi
 
-        log "Training d=$d at $flops FLOPs..."
+        log "Training s=$s (batch=$batch_size) at $flops FLOPs..."
 
         # Unique tag for this run
-        TAG="scaling_${flops}_d${d}"
+        TAG="scaling_${flops}_s${s}"
 
         # Record start time
         START_TIME=$(date +%s)
@@ -92,7 +96,8 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         # The script will auto-calculate num_iterations to hit target_flops
         # CORE eval happens once at the end (999999 ensures only final step)
         torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
-            --depth=$d \
+            --size=$s \
+            --device-batch-size=$batch_size \
             --target-flops=$flops \
             --target-param-data-ratio=-1 \
             --run="${WANDB_RUN}_${TAG}" \
@@ -102,10 +107,11 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
             --core-metric-max-per-task=-1 \
             --sample-every=-1 \
             --save-every=-1 \
-            --train-recur-mean="${N_RECURS[$i]}" \
-            --n-prelude="${N_PRELUDES[$i]}" \
-            --n-recur-block="${N_RECUR_BLOCKS[$i]}" \
-            --n-coda="${N_CODAS[$i]}" \
+            --window-pattern="LLSSSLLL" \
+            --train-recur-mean=$N_RECUR \
+            --n-prelude=$N_PRELUDE \
+            --n-recur-block=$N_RECUR_BLOCK \
+            --n-coda=$N_CODA \
             --no-sample-recur \
             2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"
 
@@ -121,22 +127,22 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         TOKENS_TRAINED=$((NUM_ITERS * 524288))
         # Param:data ratio (using scaling params per Kaplan et al.)
         PARAM_DATA_RATIO=$(python -c "print(f'{$TOKENS_TRAINED / $NUM_SCALING_PARAMS:.2f}')")
-        # Model dim
-        MODEL_DIM=$((d * 64))
+        # Model dim (width = size * aspect_ratio, default 64)
+        MODEL_DIM=$((s * 64))
         # Val BPB from final eval
         VAL_BPB=$(grep "Validation bpb:" "$LOG_FILE" | tail -1 | grep -oP '[\d.]+$')
 
         # Extract CORE score from training log (evaluated on final step)
         CORE_SCORE=$(grep "CORE metric:" "$LOG_FILE" | tail -1 | awk '{print $NF}')
         if [ -z "$CORE_SCORE" ]; then
-            log "WARNING: Could not extract CORE score for d=$d"
+            log "WARNING: Could not extract CORE score for s=$s"
             CORE_SCORE="0.0"
         fi
 
         log "  Params: $NUM_PARAMS, Iters: $NUM_ITERS, Ratio: $PARAM_DATA_RATIO, Val BPB: $VAL_BPB, CORE: $CORE_SCORE"
 
         # Append to CSV
-        echo "$flops,$d,$MODEL_DIM,$NUM_PARAMS,$NUM_SCALING_PARAMS,$NUM_ITERS,$TOKENS_TRAINED,$PARAM_DATA_RATIO,$VAL_BPB,$CORE_SCORE,$TRAIN_TIME" >> "$RESULTS_FILE"
+        echo "$flops,$s,$MODEL_DIM,$NUM_PARAMS,$NUM_SCALING_PARAMS,$NUM_ITERS,$TOKENS_TRAINED,$PARAM_DATA_RATIO,$VAL_BPB,$CORE_SCORE,$TRAIN_TIME" >> "$RESULTS_FILE"
     done
 done
 

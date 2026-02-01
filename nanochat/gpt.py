@@ -5,21 +5,19 @@ Notable features:
 - QK norm
 - untied weights for token embedding and lm_head
 - relu^2 activation in MLP
-- norm after token embedding
-- no learnable params in rmsnorm
+- sandwich norm for stable recurrence
+- RMSNorm with learnable scale
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
 - Flash Attention 3 integration
 
 Looped Transformer specifics:
 - Three-stage architecture: prelude (n_prelude layers) → recur (n_recur_block layers, run num_recur times) → coda (n_coda layers)
-- KV cache persists across all recurrences, allowing each recurrence to attend to previous tokens
 - Input injection at each recurrence: u = inject(concat(e, s)) where e=prelude output, s=recurrent state
   - inject layer initialized as identity-like [I|0] so inject(concat(e,s)) ≈ e initially
 - Warm-start inference: final recurrent state s from token t-1 initializes state for token t (disabled for training)
 - Truncated BPTT: gradients detached for all but last bptt_k recurrences to limit memory/compute
 - Variable recurrence depth: num_recur sampled from distribution during training (mean=train_recur_mean, max=train_recur_max)
-- Recurrent state flow: s ← e (init) → s ← recur(inject(e,s)) (loop num_recur times) → coda(s) → output
 """
 
 from dataclasses import dataclass
@@ -39,14 +37,14 @@ from nanochat.optim import DistMuonAdamW, MuonAdamW
 class GPTConfig:
     sequence_len: int = 2048
     vocab_size: int = 65536
-    n_layer: int = 20  # Here only used for scaling, not the actual number of layers
+    size: int = 20  # Model size knob: model_dim = size * aspect_ratio
     n_head: int = 10  # number of query heads
     n_kv_head: int = 10  # number of key/value heads (GQA)
     n_embd: int = 1280
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
-    window_pattern: str = "L"
+    window_pattern: str = "LLSSSLLL"
 
     # Looped Transformer config options
     n_prelude: int = 2
@@ -59,9 +57,21 @@ class GPTConfig:
     bptt_k: int = 4  # truncate backprop to last k recurrences
 
 
-def norm(x):
-    # Purely functional rmsnorm with no learnable params
-    return F.rms_norm(x, (x.size(-1),))
+def norm(x, eps: float = 1e-6):
+    # Purely functional rmsnorm with no learnable params (used for QK norm)
+    return F.rms_norm(x, (x.size(-1),), eps=eps)
+
+
+class RMSNorm(nn.Module):
+    """RMSNorm with learnable scale parameter."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        return F.rms_norm(x, (x.size(-1),), eps=self.eps) * self.weight
 
 
 def apply_rotary_emb(x, cos, sin):
@@ -146,10 +156,16 @@ class Block(nn.Module):
         super().__init__()
         self.attn = CausalSelfAttention(config)
         self.mlp = MLP(config)
+        # Sandwich norm layers: n1/n2 for attention, n3/n4 for MLP
+        self.n1 = RMSNorm(config.n_embd)
+        self.n2 = RMSNorm(config.n_embd)
+        self.n3 = RMSNorm(config.n_embd)
+        self.n4 = RMSNorm(config.n_embd)
 
     def forward(self, x, cos_sin, window_size, kv_cache, layer_idx=None):
-        x = x + self.attn(norm(x), cos_sin, window_size, kv_cache, layer_idx)
-        x = x + self.mlp(norm(x))
+        # Sandwich norm format: x̂=n2(x+Attn(n1(x))), x=n4(x̂+MLP(n3(x̂)))
+        x = self.n2(x + self.attn(self.n1(x), cos_sin, window_size, kv_cache, layer_idx))
+        x = self.n4(x + self.mlp(self.n3(x)))
         return x
 
 
@@ -162,10 +178,6 @@ class GPT(nn.Module):
         """
         super().__init__()
         self.config = config
-        # Validate looped Transformer config
-        assert config.n_layer >= (config.n_prelude + config.n_recur_block + config.n_coda), (
-            "n_layer must be bigger or equal than n_prelude + n_recur_block + n_coda"
-        )
 
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
@@ -185,6 +197,10 @@ class GPT(nn.Module):
         )
         # Input injection adapter
         self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
+        # RMSNorm layers outside blocks
+        self.norm_emb = RMSNorm(config.n_embd)  # after embedding
+        self.norm_recur = RMSNorm(config.n_embd)  # at end of recurrent block (nc)
+        self.norm_final = RMSNorm(config.n_embd)  # before lm_head
         self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's just "fake" meta tensors only.
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
@@ -423,15 +439,27 @@ class GPT(nn.Module):
         ddp, rank, local_rank, world_size = get_dist_info()
 
         # Separate out all parameters into groups
-        matrix_params = (
-            list(self.transformer.prelude.parameters())
-            + list(self.transformer.recur.parameters())
-            + list(self.transformer.coda.parameters())
-            + list(self.inject.parameters())
-        )
+        # Collect all RMSNorm parameters (1D scale weights)
+        norm_params = list(self.norm_emb.parameters()) + list(self.norm_recur.parameters()) + list(self.norm_final.parameters())
+        for block in list(self.transformer.prelude) + list(self.transformer.recur) + list(self.transformer.coda):
+            norm_params += list(block.n1.parameters()) + list(block.n2.parameters())
+            norm_params += list(block.n3.parameters()) + list(block.n4.parameters())
+        norm_param_set = set(norm_params)
+
+        # Matrix params: all block params except norms
+        matrix_params = [
+            p
+            for p in (
+                list(self.transformer.prelude.parameters())
+                + list(self.transformer.recur.parameters())
+                + list(self.transformer.coda.parameters())
+                + list(self.inject.parameters())
+            )
+            if p not in norm_param_set
+        ]
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -439,9 +467,10 @@ class GPT(nn.Module):
 
         # Build param_groups with all required fields explicit
         param_groups = [
-            # AdamW groups (embeddings, lm_head)
+            # AdamW groups (embeddings, lm_head, norms)
             dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=norm_params, lr=0.005 * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
@@ -492,7 +521,7 @@ class GPT(nn.Module):
 
         # 1. Embedding + norm
         x = self.transformer.wte(idx)
-        x = norm(x)
+        x = self.norm_emb(x)
 
         # 2. Prelude blocks (run once)
         for i, block in enumerate(self.transformer.prelude):
@@ -519,8 +548,7 @@ class GPT(nn.Module):
             for j, block in enumerate(self.transformer.recur):
                 layer_idx = self._get_kv_layer_idx("recur", j, kv_budget, recur_iter=i)
                 u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx)
-            # TODO: No normalization? u = norm(u)?
-            s = u  # update recurrent state
+            s = self.norm_recur(u)  # nc: rescale at end of recurrent block
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
             # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
@@ -531,7 +559,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.coda):
             layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
             x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
-        x = norm(x)
+        x = self.norm_final(x)
 
         # Advance KV cache position after all layers are done
         if kv_cache is not None:

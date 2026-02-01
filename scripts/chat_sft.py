@@ -97,7 +97,7 @@ if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_s
 orig_model = model
 # Use dynamic=False when sample_recur is enabled (varying num_recur causes recompilation otherwise)
 model = torch.compile(model, dynamic=None if args.no_sample_recur else False)
-depth = model.config.n_layer
+size = model.config.size
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len  # tokens per iteration for a single rank
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size  # total tokens per iteration for all ranks
@@ -316,7 +316,7 @@ while True:
 
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not args.dry_run:
-        output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
+        output_dirname = args.output_tag or args.model_tag or f"s{size}"  # e.g. s12
         checkpoint_dir = os.path.join(base_dir, "sft_checkpoints", output_dirname)
         save_checkpoint(
             checkpoint_dir,
@@ -329,7 +329,7 @@ while True:
                 "model_config": {
                     "sequence_len": args.max_seq_len,
                     "vocab_size": tokenizer.get_vocab_size(),
-                    "n_layer": depth,
+                    "size": size,
                     "n_head": model.config.n_head,
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,

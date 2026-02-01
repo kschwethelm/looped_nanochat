@@ -8,7 +8,7 @@ or distributed as:
 torchrun --nproc_per_node=8 -m scripts.base_train.py
 
 If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Example:
-python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 --total-batch-size=512 --num-iterations=20
+python -m scripts.base_train --size=4 --max-seq-len=512 --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 --total-batch-size=512 --num-iterations=20
 """
 
 import os
@@ -60,12 +60,12 @@ parser.add_argument(
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model architecture
-parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
-parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
+parser.add_argument("--size", type=int, default=20, help="model size (model_dim = size * aspect_ratio)")
+parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = size * aspect_ratio")
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument(
-    "--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')"
+    "--window-pattern", type=str, default="LLSSSLLL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')"
 )
 # Looped Transformer config
 parser.add_argument("--n-prelude", type=int, default=2, help="number of prelude layers")
@@ -148,17 +148,17 @@ token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
-# Model kwargs are derived from the desired depth of the model
+# Model kwargs are derived from the desired size of the model
 # We nudge model_dim up to the nearest multiple of head_dim to ensure clean division
 # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
-# (For very small depths, this gives a slight "unfair" advantage to models with odd depths)
-num_layers = args.depth
-base_dim = args.depth * args.aspect_ratio
+# (For very small sizes, this gives a slight "unfair" advantage to models with odd sizes)
+size = args.size
+base_dim = args.size * args.aspect_ratio
 model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
 num_heads = model_dim // args.head_dim
 num_kv_heads = num_heads  # default is 1:1 GQA (Group Query Attention) ratio (i.e. GQA is disabled)
 head_dim = model_dim // num_heads
-print0(f"num_layers: {num_layers}")
+print0(f"size: {size}")
 print0(f"model_dim: {model_dim} (base: {base_dim}, nudge: {model_dim - base_dim:+d})")
 print0(f"num_heads: {num_heads}")
 print0(f"head_dim: {head_dim}")
@@ -185,10 +185,10 @@ if batch_ratio != 1.0:
     batch_lr_scale = batch_ratio**0.5
     print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {args.total_batch_size:,} (reference: {reference_batch_size:,})")
 
-# Weight decay is tuned at d12 and its scaling seems to be \propto 1/channels^2 (or equivalently, \propto 1/depth^2 due to constant aspect ratio)
-weight_decay_scaled = args.weight_decay * (12 / args.depth) ** 2
-if args.depth != 12:
-    print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for depth {args.depth}")
+# Weight decay is tuned at s12 and its scaling seems to be \propto 1/channels^2 (or equivalently, \propto 1/size^2 due to constant aspect ratio)
+weight_decay_scaled = args.weight_decay * (12 / args.size) ** 2
+if args.size != 12:
+    print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for size {args.size}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
@@ -197,7 +197,7 @@ if args.depth != 12:
 model_config_kwargs = {
     "sequence_len": args.max_seq_len,
     "vocab_size": vocab_size,
-    "n_layer": num_layers,
+    "size": size,
     "n_head": num_heads,
     "n_kv_head": num_kv_heads,
     "n_embd": model_dim,
@@ -219,7 +219,7 @@ model.init_weights()  # All tensors get initialized
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
-output_dirname = args.model_tag if args.model_tag else f"d{args.depth}"  # e.g. d12
+output_dirname = args.model_tag if args.model_tag else f"s{args.size}"  # e.g. s12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = args.resume_from_step != -1
 if resuming:

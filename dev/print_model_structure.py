@@ -2,7 +2,7 @@
 Print model structure and parameter dimensions for a randomly initialized GPT model.
 
 Usage:
-    python -m dev.print_model_structure --depth=20
+    python -m dev.print_model_structure --size=20
 """
 
 import argparse
@@ -27,7 +27,7 @@ def print_model_structure(config: GPTConfig) -> None:
     print("=" * 80)
     print(f"Sequence length:     {config.sequence_len}")
     print(f"Vocab size:          {config.vocab_size}")
-    print(f"Number of layers:    {config.n_layer}")
+    print(f"Size (width knob):   {config.size}")
     print(f"Number of heads:     {config.n_head}")
     print(f"Number of KV heads:  {config.n_kv_head}")
     print(f"Embedding dim:       {config.n_embd}")
@@ -73,11 +73,11 @@ def print_model_structure(config: GPTConfig) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Print GPT model structure")
-    parser.add_argument("--depth", type=int, default=20, help="Number of transformer layers")
-    parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
+    parser.add_argument("--size", type=int, default=20, help="model size (model_dim = size * aspect_ratio)")
+    parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = size * aspect_ratio")
     parser.add_argument("--head-dim", type=int, default=128, help="Target head dimension")
     parser.add_argument("--max-seq-len", type=int, default=2048, help="Max context length")
-    parser.add_argument("--window-pattern", type=str, default="SSSL", help="Sliding window pattern")
+    parser.add_argument("--window-pattern", type=str, default="LLSSSLLL", help="Sliding window pattern")
     # Looped Transformer config
     parser.add_argument("--n-prelude", type=int, default=2, help="Number of prelude layers")
     parser.add_argument(
@@ -112,15 +112,15 @@ if __name__ == "__main__":
     vocab_size = tokenizer.get_vocab_size()
 
     # Model dimensions (same logic as base_train.py)
-    n_layer = args.depth
-    base_dim = args.depth * args.aspect_ratio
+    size = args.size
+    base_dim = args.size * args.aspect_ratio
     n_embd = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
     n_head = n_embd // args.head_dim
     n_kv_head = n_head  # default is 1:1 GQA ratio (i.e. GQA is disabled)
     head_dim = n_embd // n_head
 
     print("Calculated dimensions:")
-    print(f"  n_layer: {n_layer}")
+    print(f"  size: {size}")
     print(f"  n_embd: {n_embd} (base: {base_dim}, nudge: {n_embd - base_dim:+d})")
     print(f"  n_head: {n_head}")
     print(f"  head_dim: {head_dim}")
@@ -131,7 +131,7 @@ if __name__ == "__main__":
     config = GPTConfig(
         sequence_len=args.max_seq_len,
         vocab_size=vocab_size,
-        n_layer=n_layer,
+        size=size,
         n_head=n_head,
         n_kv_head=n_kv_head,
         n_embd=n_embd,

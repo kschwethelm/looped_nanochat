@@ -17,8 +17,9 @@ At each recurrence the prelude output is re-injected into the recurrent state vi
 Depth is the single scaling dial: `model_dim = depth × 64`, nudged up to the nearest multiple of `head_dim=128`. At the defaults (d20, r=4) the model has 8 unique layers but 20 effective layers (2 + 4×4 + 2).
 
 ### Changes compared to Trelis
-- Sandwich norm (see Huginn)
-- Sliding window attention in recursive block (planned)
+- Sandwich norm + norm at end of recurrent block (see Huginn)
+- Trainable RMSNorm
+- Sliding window attention in recursive block (SSSL)
 - Value embeddings in recursive block (from current nanochat architecture; planned)
 - Start with random normal instead of duplicate prelude output in input injection (see Huginn; planned)
 
@@ -64,16 +65,24 @@ The total is `6 × (prelude + r·recur + r·inject + coda + lm_head)`, where eac
 
 **What's excluded.** The token embedding is a table lookup, not a matmul, so it contributes zero FLOPs. The softmax exp/sum/divide is also omitted. These are the same two omissions relative to Chinchilla's formula, and together they account for roughly 1% error.
 
+### Architectural changes
+
+Since we are starting from scratch, we introduce some architectural changes:
+- Sandwich norm + norm at end of recurrent block
+- Trainable RMSNorm
+
 ### Experiment Setup
 
-In standard nanochat, `depth` elegantly controls both width AND layers together. For looped transformers, we've lost that simplicity—we have 4 knobs instead of 1.
-The pragmatic solution: define discrete "model size" configs that span a reasonable FLOPs range, each with a sensible (prelude, recur, coda, num_recur, width) combination. We also disable recursion sampling for clean measurements.
+In standard nanochat, `depth` elegantly controls both width AND layers together. In a looped transformer, recursion count decouples effective depth from physical layer count. This means the layer structure (prelude, recur, coda) and num_recur are architectural choices, not scaling knobs — changing them between runs means comparing different architectures, not the same architecture at different sizes. Power laws won't fit cleanly through that.
 
-| DEPTHS | N_PRELUDES | N_RECUR_BLOCKS | N_CODAS | N_RECURS |
-|--------|------------|----------------|---------|----------|
-| 6      | 1          | 2              | 1       | 2        |
-| 8      | 1          | 2              | 1       | 3        |
-| 10     | 1          | 2              | 1       | 4        |
-| 12     | 2          | 2              | 2       | 4        |
-| 14     | 1          | 3              | 1       | 4        |
-| 16     | 2          | 3              | 2       | 4        |
+The clean solution: fix the architecture at (2 prelude, 4 recur, 2 coda, r=4), giving a constant effective depth of 2 + 4×4 + 2 = 20 layers across the entire sweep. Width becomes the single scaling dial — both parameter count and FLOPs scale smoothly as ~O(width²), and every model in the sweep is structurally identical. Recursion sampling is disabled (--no-sample-recur) for clean FLOPs measurements.
+
+| SIZE | WIDTH | HEADS | EFF. LAYERS |   PARAMS    | FLOPS / TOK  |
+|------|-------|-------|-------------|-------------|--------------|
+| 8    | 512   | 4     | 20          | 92,816,896  | 7.678034e+08 |
+| 10   | 640   | 5     | 20          | 124,049,280 | 1.081651e+09 |
+| 12   | 768   | 6     | 20          | 158,492,928 | 1.444258e+09 |
+| 14   | 896   | 7     | 20          | 196,147,840 | 1.855623e+09 |
+| 16   | 1024  | 8     | 20          | 237,014,016 | 2.315747e+09 |
+| 18   | 1152  | 9     | 20          | 281,091,456 | 2.824630e+09 |
+| 20   | 1280  | 10    | 20          | 328,380,160 | 3.382272e+09 |

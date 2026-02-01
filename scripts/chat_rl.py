@@ -409,8 +409,8 @@ for step in range(num_steps):
     # Master process saves the model once in a while. Skip first step. Save last step.
     if master_process and ((step > 0 and step % args.save_every == 0) or step == num_steps - 1):
         base_dir = get_base_dir()
-        depth = model.config.n_layer
-        output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
+        size = model.config.size
+        output_dirname = args.output_tag or args.model_tag or f"s{size}"  # e.g. s12
         checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
         model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
         save_checkpoint(
