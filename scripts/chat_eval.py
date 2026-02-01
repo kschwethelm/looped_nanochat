@@ -390,9 +390,11 @@ if __name__ == "__main__":
             print0(f"ChatCORE metric ({recur_label}): {chatcore_metric:.4f}")
 
         # Log to report for this recur value
-        section_name = f"Chat evaluation {args.source}" + (
-            f" (r={num_recur})" if num_recur is not None else ""
-        )
+        section_name = f"Chat evaluation {args.source}"
+        if args.model_tag is not None:
+            section_name += f" {args.model_tag}"
+        if num_recur is not None:
+            section_name += f" (r={num_recur})"
         get_report().log(
             section=section_name,
             data=[

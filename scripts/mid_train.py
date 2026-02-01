@@ -486,8 +486,11 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 if not args.dry_run:
     from nanochat.report import get_report
 
+    section_name = "Midtraining"
+    if args.model_tag is not None:
+        section_name += f" {args.model_tag}"
     get_report().log(
-        section="Midtraining",
+        section=section_name,
         data=[
             user_config,  # CLI args
             {  # stats about the training setup

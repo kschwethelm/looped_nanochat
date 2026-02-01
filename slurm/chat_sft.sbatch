@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=looped_nanochat_chat_sft
-#SBATCH --output=logs/chat_sft/%A_%a.out
-#SBATCH --error=logs/chat_sft/%A_%a.err
+#SBATCH --output=logs/chat_sft/%A.out
+#SBATCH --error=logs/chat_sft/%A.err
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH -p mcml-hgx-h100-94x4
@@ -37,4 +37,5 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \
     -- -i sft -g d20_def \
     --batch-size 32 \
     --kv-budget 1 \
-    --use-rec-warm-start
+    --use-rec-warm-start \
+    --num-recur "2,4,10,16"

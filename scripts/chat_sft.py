@@ -399,8 +399,11 @@ if master_process:
     print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 
+section_name = "Chat SFT"
+if args.model_tag is not None:
+    section_name += f" {args.model_tag}"
 get_report().log(
-    section="Chat SFT",
+    section=section_name,
     data=[
         user_config,  # CLI args
         {

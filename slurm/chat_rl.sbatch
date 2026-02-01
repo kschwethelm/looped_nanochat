@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=looped_nanochat_chat_rl
-#SBATCH --output=logs/chat_rl/%A_%a.out
-#SBATCH --error=logs/chat_rl/%A_%a.err
+#SBATCH --output=logs/chat_rl/%A.out
+#SBATCH --error=logs/chat_rl/%A.err
 #SBATCH --time=09:00:00
 #SBATCH --nodes=1
 #SBATCH -p mcml-hgx-h100-94x4

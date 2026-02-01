@@ -698,8 +698,11 @@ print0(f"Total training time: {total_training_time / 60:.2f}m")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
+section_name = "Base model training"
+if args.model_tag is not None:
+    section_name += f" {args.model_tag}"
 get_report().log(
-    section="Base model training",
+    section=section_name,
     data=[
         user_config,  # CLI args
         {  # stats about the training setup

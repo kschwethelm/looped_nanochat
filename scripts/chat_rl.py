@@ -490,8 +490,11 @@ for step in range(num_steps):
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
+section_name = "Chat RL"
+if args.model_tag is not None:
+    section_name += f" {args.model_tag}"
 get_report().log(
-    section="Chat RL",
+    section=section_name,
     data=[
         user_config,  # CLI args
     ],
