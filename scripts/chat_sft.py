@@ -317,7 +317,7 @@ while True:
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not args.dry_run:
         output_dirname = args.output_tag or args.model_tag or f"s{size}"  # e.g. s12
-        checkpoint_dir = os.path.join(base_dir, "sft_checkpoints", output_dirname)
+        checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
         save_checkpoint(
             checkpoint_dir,
             step,
