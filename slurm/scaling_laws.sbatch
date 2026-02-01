@@ -1,20 +1,45 @@
 #!/bin/bash
+#SBATCH --job-name=looped_nanochat_scaling_laws
+#SBATCH --output=logs/scaling_laws/%A.out
+#SBATCH --error=logs/scaling_laws/%A.err
+#SBATCH --time=02:00:00
+#SBATCH --nodes=1
+#SBATCH -p mcml-hgx-h100-94x4
+#SBATCH -q mcml
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --ntasks=1
+#SBATCH --mail-type=FAIL,END
+#SBATCH --mail-user=k.schwethelm@tum.de
 
-LABEL="jan16"
+LABEL="feb1"
 
 FLOPS_BUDGETS=(
     1e18
     3e18
     6e18
 )
-DEPTHS=(6 7 8 9 10 11 12 13 14)
+# Discrete model configs
+DEPTHS=(          6    8    10   12   14   16)
+N_PRELUDES=(      1    1    1    2    1    2)
+N_RECUR_BLOCKS=(  2    2    2    2    3    3)
+N_CODAS=(         1    1    1    2    1    2)
+N_RECURS=(      2    3    4    4    4    4)
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+NPROC_PER_NODE=1 # Number of processes/GPUs to use
 WANDB_RUN="${WANDB_RUN:-scaling_${LABEL}}"
 EVAL_TOKENS=$((100 * 524288))  # ~100M tokens for final eval (default is ~10M)
 
-export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-$HOME/.cache/nanochat}"
+export OMP_NUM_THREADS=1 # disable CPU multi-threading for libraries that use OpenMP (NumPy, PyTorch CPU ops, etc.)
+
+# Set cache directories (datasets as subdirectory of HF_HOME)
+BASE_DIR="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000"
+export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/nanochat"
+export HF_HOME="$BASE_DIR/LLMs/.cache/huggingface"
+export HF_DATASETS_CACHE="$BASE_DIR/LLMs/.cache/huggingface/datasets"
+
+cd /dss/dsshome1/0D/go68tos2/looped_nanochat
+uv sync
 source .venv/bin/activate
 
 RESULTS_DIR="$NANOCHAT_BASE_DIR/scaling_laws_results_${LABEL}"
@@ -30,7 +55,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Check if a run already exists in results
+# Check if a run already exists in results CSV
 run_exists() {
     local flops=$1
     local depth=$2
@@ -46,7 +71,8 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
     log "Compute budget: $flops FLOPs"
     log "=============================================="
 
-    for d in "${DEPTHS[@]}"; do
+    for i in "${!DEPTHS[@]}"; do
+        d="${DEPTHS[$i]}"
 
         # Skip if already completed
         if run_exists "$flops" "$d"; then
@@ -76,6 +102,11 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
             --core-metric-max-per-task=-1 \
             --sample-every=-1 \
             --save-every=-1 \
+            --train-recur-mean="${N_RECURS[$i]}" \
+            --n-prelude="${N_PRELUDES[$i]}" \
+            --n-recur-block="${N_RECUR_BLOCKS[$i]}" \
+            --n-coda="${N_CODAS[$i]}" \
+            --no-sample-recur \
             2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"
 
         END_TIME=$(date +%s)

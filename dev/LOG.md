@@ -1,4 +1,4 @@
-# Experiment Log
+# Original Repo's Experiment Log
 
 A running summary documenting some experiments and findings. Started ~Jan 7 2026.
 

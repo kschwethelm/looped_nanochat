@@ -23,17 +23,16 @@ Looped Transformer specifics:
 """
 
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from nanochat.common import get_dist_info, print0
-from nanochat.optim import MuonAdamW, DistMuonAdamW
 
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
+from nanochat.optim import DistMuonAdamW, MuonAdamW
 
 
 @dataclass
@@ -297,6 +296,45 @@ class GPT(nn.Module):
     def get_device(self):
         return self.transformer.wte.weight.device
 
+    def _get_kv_layer_idx(
+        self,
+        section: str,
+        block_idx: int,
+        kv_budget: int | None,
+        recur_iter: int | None = None,
+    ) -> int | None:
+        """
+        Compute the KV cache layer index for a given section and block.
+
+        The KV cache layout is:
+            [prelude layers | recurrence slots | coda layers]
+            [0..n_prelude)  | [n_prelude..n_prelude + kv_budget*n_recur_block) | [coda start..)
+
+        Args:
+            section: One of "prelude", "recur", or "coda"
+            block_idx: Index within the section (0-indexed)
+            kv_budget: Number of recurrence slots to store in cache (None means no cache)
+            recur_iter: Current recurrence iteration (required for "recur" section)
+
+        Returns:
+            The layer index for the KV cache, or None if kv_budget is None
+        """
+        if kv_budget is None:
+            return None
+
+        if section == "prelude":
+            return block_idx
+        elif section == "recur":
+            assert recur_iter is not None, "recur_iter required for recur section"
+            # Circular indexing: slot = recur_iter % kv_budget
+            slot = recur_iter % kv_budget
+            return self.config.n_prelude + (slot * self.config.n_recur_block) + block_idx
+        elif section == "coda":
+            # Coda comes after all recurrence slots
+            return self.config.n_prelude + (kv_budget * self.config.n_recur_block) + block_idx
+        else:
+            raise ValueError(f"Unknown section: {section}")
+
     def estimate_flops(self, num_recur=None):
         """
         Return the estimated FLOPs per token for the looped model (forward + backward).
@@ -439,7 +477,6 @@ class GPT(nn.Module):
         if num_recur is None:
             num_recur = int(self.config.train_recur_mean)
 
-        # Get kv_budget from cache if provided (only used during inference with KV cache)
         kv_budget = kv_cache.kv_budget if kv_cache is not None else None
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -459,7 +496,7 @@ class GPT(nn.Module):
 
         # 2. Prelude blocks (run once)
         for i, block in enumerate(self.transformer.prelude):
-            layer_idx = i if kv_cache is not None else None
+            layer_idx = self._get_kv_layer_idx("prelude", i, kv_budget)
             x = block(x, cos_sin, self.window_sizes[i], kv_cache, layer_idx)
         e = x  # prelude output, used for injection into each recurrence
 
@@ -480,12 +517,7 @@ class GPT(nn.Module):
             u = self.inject(torch.cat([e, s], dim=-1))
             # Run recur blocks with KV cache
             for j, block in enumerate(self.transformer.recur):
-                if kv_cache is not None:
-                    # Circular indexing based on kv_budget
-                    # At iteration i, use cache slot (i % kv_budget)
-                    layer_idx = self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
-                else:
-                    layer_idx = None
+                layer_idx = self._get_kv_layer_idx("recur", j, kv_budget, recur_iter=i)
                 u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx)
             # TODO: No normalization? u = norm(u)?
             s = u  # update recurrent state
@@ -497,18 +529,8 @@ class GPT(nn.Module):
         # 5. Coda blocks (run once)
         x = s
         for i, block in enumerate(self.transformer.coda):
-            if kv_cache is not None:
-                # Coda comes after all recurrence slots (based on kv_budget)
-                layer_idx = self.config.n_prelude + (kv_budget * self.config.n_recur_block) + i
-            else:
-                layer_idx = None
-            x = block(
-                x,
-                cos_sin,
-                self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i],
-                kv_cache,
-                layer_idx,
-            )
+            layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
+            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
         x = norm(x)
 
         # Advance KV cache position after all layers are done
