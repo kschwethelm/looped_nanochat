@@ -29,7 +29,7 @@ NPROC_PER_NODE=1
 
 # Run chat evaluation
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft \
-    -- --source mid  --model-tag d20 --output-tag d20_def \
+    -- --model-tag d20 --output-tag d20_def \
     --device-batch-size 16 \
     --run default_cfg
 
