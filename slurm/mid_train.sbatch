@@ -2,7 +2,7 @@
 #SBATCH --job-name=looped_nanochat_mid_train
 #SBATCH --output=logs/mid_train/%A_%a.out
 #SBATCH --error=logs/mid_train/%A_%a.err
-#SBATCH --time=05:00:00
+#SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH -p mcml-hgx-h100-94x4
 #SBATCH -q mcml

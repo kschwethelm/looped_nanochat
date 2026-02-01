@@ -2,7 +2,7 @@
 #SBATCH --job-name=looped_nanochat_chat_sft
 #SBATCH --output=logs/chat_sft/%A_%a.out
 #SBATCH --error=logs/chat_sft/%A_%a.err
-#SBATCH --time=05:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH -p mcml-hgx-h100-94x4
 #SBATCH -q mcml
@@ -30,7 +30,7 @@ NPROC_PER_NODE=1
 # Run chat evaluation
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft \
     -- --source mid  --model-tag d20 --output-tag d20_def \
-    --device-batch-size 32 \
+    --device-batch-size 16 \
     --run default_cfg
 
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval \

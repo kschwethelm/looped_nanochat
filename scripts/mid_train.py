@@ -98,6 +98,11 @@ parser.add_argument(
 parser.add_argument(
     "--dry-run", action="store_true", help="log to wandb but skip checkpoints/report"
 )
+parser.add_argument(
+    "--no-sample-recur",
+    action="store_true",
+    help="disable sampling num_recur; use fixed train_recur_mean instead",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -133,7 +138,7 @@ if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_s
         f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?"
     )
 orig_model = model
-model = torch.compile(model, dynamic=False)
+model = torch.compile(model, dynamic=not args.no_sample_recur)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = (
@@ -398,11 +403,15 @@ while True:
     t0 = time.time()
     for _micro_step in range(grad_accum_steps):
         # Sample number of recurrences from Poisson log-normal distribution
-        num_recur = sample_poisson_lognormal_recurrence(
-            mean_recur=model.config.train_recur_mean,
-            sigma=0.5,
-            max_recur=model.config.train_recur_max,
-        )
+        # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
+        if args.no_sample_recur:
+            num_recur = None
+        else:
+            num_recur = sample_poisson_lognormal_recurrence(
+                mean_recur=model.config.train_recur_mean,
+                sigma=0.5,
+                max_recur=model.config.train_recur_max,
+            )
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
@@ -449,6 +458,10 @@ while True:
         f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time / 60:.2f}m"
     )
     if step % 10 == 0:
+        # For logging: use actual num_recur if sampled, otherwise the fixed default
+        logged_num_recur = (
+            num_recur if num_recur is not None else int(model.config.train_recur_mean)
+        )
         wandb_run.log(
             {
                 "step": step,
@@ -460,6 +473,7 @@ while True:
                 "train/tok_per_sec": tok_per_sec,
                 "train/mfu": mfu,
                 "train/epoch": current_epoch,
+                "train/num_recur": logged_num_recur,
             }
         )
 

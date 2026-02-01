@@ -38,9 +38,10 @@ from nanochat.dataloader import (
     tokenizing_distributed_data_loader_with_state_bos_bestfit,
 )
 from nanochat.engine import Engine
-from nanochat.flash_attention import HAS_FA3
+from nanochat.flash_attention import HAS_FA2, HAS_FA3
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.loss_eval import evaluate_bpb
+from nanochat.report import get_report
 from nanochat.tokenizer import get_token_bytes, get_tokenizer
 from scripts.base_eval import evaluate_model
 
@@ -95,6 +96,11 @@ parser.add_argument(
     type=int,
     default=4,
     help="truncate backprop to last k recurrences (limits gradient depth)",
+)
+parser.add_argument(
+    "--no-sample-recur",
+    action="store_true",
+    help="disable sampling num_recur; use fixed train_recur_mean instead",
 )
 # Training horizon (only one used, in order of precedence)
 parser.add_argument(
@@ -249,12 +255,12 @@ wandb_run = (
 )
 
 # Flash Attention status
-if HAS_FA3:
-    print0("✓ Using Flash Attention 3 (Hopper GPU detected), efficient, new and awesome.")
+if HAS_FA3 or HAS_FA2:
+    print0("✓ Using Flash Attention, efficient and awesome.")
 else:
     print0("!" * 80)
-    print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
-    print0("WARNING: Training will be less efficient without FA3")
+    print0("WARNING: Flash Attention not available, using PyTorch SDPA fallback")
+    print0("WARNING: Training will be less efficient without FA")
     if args.window_pattern != "L":
         print0(
             f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible."
@@ -328,22 +334,22 @@ if args.depth != 12:
 # Initialize the Model
 
 # Create a new model with random weights
-model_config_kwargs = dict(
-    sequence_len=args.max_seq_len,
-    vocab_size=vocab_size,
-    n_layer=num_layers,
-    n_head=num_heads,
-    n_kv_head=num_kv_heads,
-    n_embd=model_dim,
-    window_pattern=args.window_pattern,
+model_config_kwargs = {
+    "sequence_len": args.max_seq_len,
+    "vocab_size": vocab_size,
+    "n_layer": num_layers,
+    "n_head": num_heads,
+    "n_kv_head": num_kv_heads,
+    "n_embd": model_dim,
+    "window_pattern": args.window_pattern,
     # Looped Transformer config
-    n_prelude=args.n_prelude,
-    n_recur_block=args.n_recur_block,
-    n_coda=args.n_coda,
-    train_recur_mean=args.train_recur_mean,
-    train_recur_max=args.train_recur_max,
-    bptt_k=args.bptt_k,
-)
+    "n_prelude": args.n_prelude,
+    "n_recur_block": args.n_recur_block,
+    "n_coda": args.n_coda,
+    "train_recur_mean": args.train_recur_mean,
+    "train_recur_max": args.train_recur_max,
+    "bptt_k": args.bptt_k,
+}
 with torch.device("meta"):
     # All tensors are created as meta tensors (they have shape/dtype but no data)
     model_config = GPTConfig(**model_config_kwargs)
@@ -371,9 +377,7 @@ if resuming:
     del model_data  # free up this memory after the copy
 
 orig_model = model  # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(
-    model, dynamic=False
-)  # the inputs to model will never change shape so dynamic=False is safe
+model = torch.compile(model, dynamic=not args.no_sample_recur)
 num_params = sum(p.numel() for p in model.parameters())
 num_scaling_params = orig_model.num_scaling_params()
 print0(f"Number of parameters: {num_params:,} (scaling: {num_scaling_params:,})")
@@ -431,9 +435,10 @@ train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
     device=device,
     resume_state_dict=dataloader_resume_state_dict,
 )
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
-    tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device
-)
+def build_val_loader():
+    return tokenizing_distributed_data_loader_bos_bestfit(
+        tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device
+    )
 x, y, dataloader_state_dict = next(train_loader)  # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
@@ -602,13 +607,17 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
-    for micro_step in range(grad_accum_steps):
-        # Sample number of recurrences from Poisson log-normal distribution (per paper Section 3.3)
-        num_recur = sample_poisson_lognormal_recurrence(
-            mean_recur=model_config.train_recur_mean,
-            sigma=0.5,
-            max_recur=model_config.train_recur_max,
-        )
+    for _micro_step in range(grad_accum_steps):
+        # Sample number of recurrences from Poisson log-normal distribution (per Geiping et al. (2025) Section 3.3)
+        # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
+        if args.no_sample_recur:
+            num_recur = None
+        else:
+            num_recur = sample_poisson_lognormal_recurrence(
+                mean_recur=model_config.train_recur_mean,
+                sigma=0.5,
+                max_recur=model_config.train_recur_max,
+            )
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
@@ -662,6 +671,10 @@ while True:
         f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time / 60:.2f}m{eta_str}"
     )
     if step % 100 == 0:
+        # For logging: use actual num_recur if sampled, otherwise the fixed default
+        logged_num_recur = (
+            num_recur if num_recur is not None else int(model_config.train_recur_mean)
+        )
         log_data = {
             "step": step,
             "total_training_flops": flops_so_far,
@@ -672,6 +685,7 @@ while True:
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
             "train/epoch": epoch,
+            "train/num_recur": logged_num_recur,
         }
         wandb_run.log(log_data)
 
@@ -683,9 +697,6 @@ print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time / 60:.2f}m")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
-
-# Log to report
-from nanochat.report import get_report
 
 get_report().log(
     section="Base model training",

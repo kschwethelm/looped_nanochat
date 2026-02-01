@@ -120,6 +120,11 @@ parser.add_argument(
     default=1,
     help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
 )
+parser.add_argument(
+    "--no-sample-recur",
+    action="store_true",
+    help="disable sampling num_recur; use fixed train_recur_mean instead",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -332,11 +337,15 @@ print0(f"Calculated examples per rank: {examples_per_rank}")
 batch_iterator = get_batch()
 for step in range(num_steps):
     # Sample num_recur for this entire step (maintains on-policy consistency)
-    current_step_num_recur = sample_poisson_lognormal_recurrence(
-        mean_recur=model.config.train_recur_mean,
-        sigma=0.5,
-        max_recur=model.config.train_recur_max,
-    )
+    # If --no-sample-recur is set, use None to let the model use its default (train_recur_mean)
+    if args.no_sample_recur:
+        current_step_num_recur = None
+    else:
+        current_step_num_recur = sample_poisson_lognormal_recurrence(
+            mean_recur=model.config.train_recur_mean,
+            sigma=0.5,
+            max_recur=model.config.train_recur_max,
+        )
 
     # Evaluate the model once in a while and log to wandb
     if step % args.eval_every == 0:
@@ -427,15 +436,21 @@ for step in range(num_steps):
         dist.all_reduce(mean_sequence_length_tensor, op=dist.ReduceOp.AVG)
         mean_reward = mean_reward_tensor.item()
         mean_sequence_length = mean_sequence_length_tensor.item()
+    # For logging: use actual num_recur if sampled, otherwise the fixed default
+    logged_num_recur = (
+        current_step_num_recur
+        if current_step_num_recur is not None
+        else int(model.config.train_recur_mean)
+    )
     print0(
-        f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f} | num_recur: {current_step_num_recur}"
+        f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f} | num_recur: {logged_num_recur}"
     )
     wandb_run.log(
         {
             "step": step,
             "reward": mean_reward,
             "sequence_length": mean_sequence_length,
-            "num_recur": current_step_num_recur,
+            "num_recur": logged_num_recur,
         }
     )
 

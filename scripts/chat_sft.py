@@ -106,6 +106,11 @@ parser.add_argument(
 parser.add_argument(
     "--eval-metrics-max-problems", type=int, default=1024, help="max problems per metric evaluation"
 )
+parser.add_argument(
+    "--no-sample-recur",
+    action="store_true",
+    help="disable sampling num_recur; use fixed train_recur_mean instead",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -322,11 +327,15 @@ for step in range(num_iterations):
     for _micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)
         # Sample number of recurrences from Poisson log-normal distribution
-        num_recur = sample_poisson_lognormal_recurrence(
-            mean_recur=model.config.train_recur_mean,
-            sigma=0.5,
-            max_recur=model.config.train_recur_max,
-        )
+        # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
+        if args.no_sample_recur:
+            num_recur = None
+        else:
+            num_recur = sample_poisson_lognormal_recurrence(
+                mean_recur=model.config.train_recur_mean,
+                sigma=0.5,
+                max_recur=model.config.train_recur_max,
+            )
         with autocast_ctx:
             loss = model(train_inputs, train_targets, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
@@ -350,6 +359,8 @@ for step in range(num_iterations):
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
+    # For logging: use actual num_recur if sampled, otherwise the fixed default
+    logged_num_recur = num_recur if num_recur is not None else int(model.config.train_recur_mean)
     print0(
         f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}"
     )
@@ -359,6 +370,7 @@ for step in range(num_iterations):
             "lrm": lrm,
             "train_loss": train_loss_item,
             "num_tokens": num_tokens_item,
+            "num_recur": logged_num_recur,
         }
     )
     step += 1
