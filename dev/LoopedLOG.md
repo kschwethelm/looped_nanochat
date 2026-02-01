@@ -6,39 +6,6 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
-## Architecture
-
-Follows Huginn architecture (Geiping et al., 2025). Some experiments were already done by [Trelis Research](https://github.com/TrelisResearch/nanochat/tree/recursive) but I would like to redo them.
-
-Three-stage looped transformer: **prelude** (2 layers) → **recur** (4 layers, iterated *r* times) → **coda** (2 layers).
-
-At each recurrence the prelude output is re-injected into the recurrent state via a learned `inject` layer (identity-initialized). The recurrence count *r* is sampled from a Poisson log-normal distribution (mean=4, max=16) during training to encourage generalization across iteration depths. Gradients are truncated to the last `bptt_k=4` recurrences.
-
-Depth is the single scaling dial: `model_dim = depth × 64`, nudged up to the nearest multiple of `head_dim=128`. At the defaults (d20, r=4) the model has 8 unique layers but 20 effective layers (2 + 4×4 + 2).
-
-### Changes compared to Trelis
-- Sandwich norm + norm at end of recurrent block (see Huginn)
-- Trainable RMSNorm
-- Sliding window attention in recursive block (SSSL)
-- Value embeddings in recursive block (from current nanochat architecture; planned)
-- Start with random normal instead of duplicate prelude output in input injection (see Huginn; planned)
-
-## Training Pipeline
-
-| Stage | Script | Description |
-|-------|--------|-------------|
-| 1 | `base_train` | Next-token prediction on web text. Training budget set by param-data ratio (default 4×). CORE evaluated periodically. |
-| 2 | `chat_sft` | SFT on ~856K-row mixture: SmolTalk 460K, MMLU 100K, GSM8K 16K (×2ep), identity 2K (×2ep), SimpleSpelling 200K, SpellingBee 80K. Single epoch, bestfit-pad packing. |
-| 3 | `chat_rl` | Simplified GRPO on GSM8K. On-policy, no KL/trust region. Advantage = reward − mean(reward), DAPO-style token-level normalization. |
-
-## Primary Metric: CORE
-
-22-task composite benchmark from the DCLM paper, spanning world knowledge, language understanding, commonsense reasoning, symbolic problem solving, and reading comprehension. Raw task accuracies are centered against random-guessing baselines and averaged into a single score.
-
-**Target: beat nanochat at CORE = 0.2565.**
-
----
-
 ## 2026-02-01: Initial Scaling Laws
 
 > **Note:** all scaling-law runs here use a fixed recursion depth for the FLOPs budget. In practice *r* is sampled from a Poisson log-normal with mean 4 during training, so the per-step FLOPs fluctuate around this value. Using the mean as a single point estimate is ok for now.
