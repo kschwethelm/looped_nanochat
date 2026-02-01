@@ -38,13 +38,12 @@ from nanochat.dataloader import (
     tokenizing_distributed_data_loader_with_state_bos_bestfit,
 )
 from nanochat.engine import Engine
-from nanochat.flash_attention import HAS_FA2, HAS_FA3
+from nanochat.flash_attention import HAS_FA3
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.report import get_report
 from nanochat.tokenizer import get_token_bytes, get_tokenizer
-from scripts.base_eval import evaluate_model
-
+from scripts.base_eval import evaluate_core
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -523,7 +522,7 @@ while True:
     ):
         model.eval()
         with autocast_ctx:
-            results = evaluate_model(
+            results = evaluate_core(
                 orig_model,
                 tokenizer,
                 device,
