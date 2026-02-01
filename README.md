@@ -143,8 +143,7 @@ I've published a number of guides that might contain helpful information:
 │   ├── scaling_laws.sh             # Scaling laws experiments
 │   └── speedrun.sh                 # Train the ~$100 nanochat d20
 ├── scripts
-│   ├── base_eval.py                # Base model: calculate CORE score
-│   ├── base_loss.py                # Base model: calculate bits per byte, sample
+│   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
 │   ├── base_train.py               # Base model: train
 │   ├── chat_cli.py                 # Chat model: talk to over CLI
 │   ├── chat_eval.py                # Chat model: eval tasks

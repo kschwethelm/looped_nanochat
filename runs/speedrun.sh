@@ -74,9 +74,7 @@ NPROC_PER_NODE=8
 
 # d24 model (slightly overtrained is enough to beat GPT-2 => increase data:params ratio from compute optimal 10.5 (default) to 12)
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=24 --target-param-data-ratio=12 --run=$WANDB_RUN
-# evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
-# evaluate the model on CORE tasks
+# evaluate the model: CORE metric, BPB on train/val, and draw samples
 torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 
 # -----------------------------------------------------------------------------
