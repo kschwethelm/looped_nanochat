@@ -38,12 +38,8 @@ class ColoredFormatter(logging.Formatter):
         # Add color to specific parts of the message
         if levelname == "INFO":
             # Highlight numbers and percentages
-            message = re.sub(
-                r"(\d+\.?\d*\s*(?:GB|MB|%|docs))", rf"{self.BOLD}\1{self.RESET}", message
-            )
-            message = re.sub(
-                r"(Shard \d+)", rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}", message
-            )
+            message = re.sub(r"(\d+\.?\d*\s*(?:GB|MB|%|docs))", rf"{self.BOLD}\1{self.RESET}", message)
+            message = re.sub(r"(Shard \d+)", rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}", message)
         return message
 
 
@@ -138,9 +134,7 @@ def print_banner():
     print0(banner)
 
 
-def sample_poisson_lognormal_recurrence(
-    mean_recur: float, sigma: float = 0.5, max_recur: int | None = None
-) -> int:
+def sample_poisson_lognormal_recurrence(mean_recur: float, sigma: float = 0.5, max_recur: int | None = None) -> int:
     """
     Sample number of recurrences from Poisson log-normal distribution.
 
@@ -209,13 +203,9 @@ def compute_init(device_type="cuda"):  # cuda|cpu|mps
 
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
     if device_type == "cuda":
-        assert torch.cuda.is_available(), (
-            "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
-        )
+        assert torch.cuda.is_available(), "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
     if device_type == "mps":
-        assert torch.backends.mps.is_available(), (
-            "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
-        )
+        assert torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
 
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.

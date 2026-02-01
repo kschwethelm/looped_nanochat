@@ -308,9 +308,7 @@ class Report:
             else:
                 start_time = None  # will cause us to not write the total wall clock time
                 bloat_data = "[bloat data missing]"
-                print(
-                    f"Warning: {header_file} does not exist. Did you forget to run `nanochat reset`?"
-                )
+                print(f"Warning: {header_file} does not exist. Did you forget to run `nanochat reset`?")
             # process all the individual sections
             for file_name in EXPECTED_FILES:
                 section_file = os.path.join(report_dir, file_name)

@@ -116,12 +116,12 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
     # This gives us contiguous views and a single HtoD transfer
     use_cuda = device == "cuda"
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda) # staging area (CPU)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device) # on-device buffer
-    cpu_inputs = cpu_buffer[:B * T].view(B, T) # a few views into these buffers just for convenience
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
+    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda)  # staging area (CPU)
+    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device)  # on-device buffer
+    cpu_inputs = cpu_buffer[: B * T].view(B, T)  # a few views into these buffers just for convenience
+    cpu_targets = cpu_buffer[B * T :].view(B, T)
+    inputs = gpu_buffer[: B * T].view(B, T)
+    targets = gpu_buffer[B * T :].view(B, T)
 
     while True:
         rows = []
@@ -165,9 +165,8 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
         yield inputs, targets, state_dict
 
+
 def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(
-        *args, **kwargs
-    ):
+    for inputs, targets, _state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
         yield inputs, targets

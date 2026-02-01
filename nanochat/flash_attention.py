@@ -165,9 +165,7 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     return y.transpose(1, 2)  # back to (B, T, H, D)
 
 
-def flash_attn_with_kvcache(
-    q, k_cache, v_cache, k=None, v=None, cache_seqlens=None, causal=False, window_size=(-1, -1)
-):
+def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None, causal=False, window_size=(-1, -1)):
     """
     Flash Attention with KV cache for inference.
 

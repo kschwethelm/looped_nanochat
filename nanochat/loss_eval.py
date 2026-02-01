@@ -42,9 +42,7 @@ def evaluate_bpb(model, batches, steps, token_bytes):
             valid = y >= 0
             y_safe = torch.where(valid, y, torch.zeros_like(y))
             # map valid targets to their byte length; ignored targets contribute 0 bytes
-            num_bytes2d = torch.where(
-                valid, token_bytes[y_safe], torch.zeros_like(y, dtype=token_bytes.dtype)
-            )
+            num_bytes2d = torch.where(valid, token_bytes[y_safe], torch.zeros_like(y, dtype=token_bytes.dtype))
             total_nats += (loss2d * (num_bytes2d > 0)).sum()
             total_bytes += num_bytes2d.sum()
         else:

@@ -90,14 +90,10 @@ def build_model(checkpoint_dir, step, device, phase):
     - meta data saved during base model training
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
-    model_data, optimizer_data, meta_data = load_checkpoint(
-        checkpoint_dir, step, device, load_optimizer=False
-    )
+    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
     if device.type in {"cpu", "mps"}:
         # Convert bfloat16 tensors to float for CPU inference
-        model_data = {
-            k: v.float() if v.dtype == torch.bfloat16 else v for k, v in model_data.items()
-        }
+        model_data = {k: v.float() if v.dtype == torch.bfloat16 else v for k, v in model_data.items()}
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
@@ -127,9 +123,7 @@ def build_model(checkpoint_dir, step, device, phase):
 
 def find_largest_model(checkpoints_dir):
     # attempt to guess the model tag: take the biggest model available
-    model_tags = [
-        f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))
-    ]
+    model_tags = [f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))]
     if not model_tags:
         raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}")
     # 1) normally all model tags are of the form d<number>, try that first:

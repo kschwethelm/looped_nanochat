@@ -44,69 +44,49 @@ from tasks.gsm8k import GSM8K
 # CLI arguments
 parser = argparse.ArgumentParser(description="Reinforcement learning on GSM8K")
 # Logging
-parser.add_argument(
-    "--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)"
-)
+parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--dtype", type=str, default="bfloat16", help="float32|bfloat16")
 # Model loading
-parser.add_argument(
-    "--source", type=str, default="sft", help="mid|sft - which checkpoint to load from"
-)
+parser.add_argument("--source", type=str, default="sft", help="mid|sft - which checkpoint to load from")
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
-parser.add_argument(
-    "--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)"
-)
+parser.add_argument("--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)")
 # Training horizon
 parser.add_argument("--num-epochs", type=int, default=1, help="number of epochs over GSM8K")
 # Batch sizes / sampling
-parser.add_argument(
-    "--device-batch-size", type=int, default=8, help="max batch size per forward pass"
-)
+parser.add_argument("--device-batch-size", type=int, default=8, help="max batch size per forward pass")
 parser.add_argument(
     "--examples-per-step",
     type=int,
     default=16,
     help="total examples per optimization step across all ranks",
 )
-parser.add_argument(
-    "--num-samples", type=int, default=16, help="number of samples per example/question"
-)
+parser.add_argument("--num-samples", type=int, default=16, help="number of samples per example/question")
 # Generation
-parser.add_argument(
-    "--max-new-tokens", type=int, default=256, help="max tokens to generate per sample"
-)
+parser.add_argument("--max-new-tokens", type=int, default=256, help="max tokens to generate per sample")
 parser.add_argument("--temperature", type=float, default=1.0, help="sampling temperature")
 parser.add_argument("--top-k", type=int, default=50, help="top-k sampling (0 = disabled)")
 # Optimization
-parser.add_argument(
-    "--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters (Adam)"
-)
+parser.add_argument("--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters (Adam)")
 parser.add_argument(
     "--unembedding-lr",
     type=float,
     default=0.004,
     help="learning rate for unembedding parameters (Adam)",
 )
-parser.add_argument(
-    "--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)"
-)
+parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument(
     "--weight-decay",
     type=float,
     default=0.0,
     help="weight decay for embedding/unembedding parameters (Adam)",
 )
-parser.add_argument(
-    "--init-lr-frac", type=float, default=0.05, help="initial LR as fraction of base LR"
-)
+parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR as fraction of base LR")
 # Evaluation / checkpointing
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
-parser.add_argument(
-    "--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation"
-)
+parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
 parser.add_argument("--save-every", type=int, default=60, help="save checkpoint every N steps")
 # Recurrence options
 parser.add_argument(
@@ -134,24 +114,14 @@ device_type = autodetect_device_type() if args.device_type == "" else args.devic
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
 ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-autocast_ctx = (
-    torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-    if device_type == "cuda"
-    else nullcontext()
-)
+autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = (
-    DummyWandb()
-    if use_dummy_wandb
-    else wandb.init(project="nanochat-rl", name=args.run, config=user_config)
-)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl", name=args.run, config=user_config)
 
 # Init model and tokenizer
-model, tokenizer, meta = load_model(
-    args.source, device, phase="eval", model_tag=args.model_tag, step=args.model_step
-)
+model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.model_step)
 engine = Engine(model, tokenizer)  # for sampling rollouts
 
 # -----------------------------------------------------------------------------
@@ -167,15 +137,9 @@ current_step_num_recur = None
 
 
 @torch.no_grad()
-def get_batch() -> Generator[
-    tuple[list[list[int]], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None, None
-]:
-    assistant_end = tokenizer.encode_special(
-        "<|assistant_end|>"
-    )  # ok to use this token, it's only for padding and isn't used in the loss.
-    rank_indices = range(
-        ddp_rank, len(train_task), ddp_world_size
-    )  # each rank is responsible for different examples in the training data
+def get_batch() -> Generator[tuple[list[list[int]], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], None, None]:
+    assistant_end = tokenizer.encode_special("<|assistant_end|>")  # ok to use this token, it's only for padding and isn't used in the loss.
+    rank_indices = range(ddp_rank, len(train_task), ddp_world_size)  # each rank is responsible for different examples in the training data
     for example_idx in itertools.cycle(rank_indices):
         # First get the full conversation of both user and assistant messages
         conversation = train_task[example_idx]
@@ -189,9 +153,7 @@ def get_batch() -> Generator[
         model.eval()  # ensure the model is in eval mode
         generated_token_sequences = []
         masks = []
-        num_sampling_steps = (
-            args.num_samples // args.device_batch_size
-        )  # go sequentially to prevent OOMs
+        num_sampling_steps = args.num_samples // args.device_batch_size  # go sequentially to prevent OOMs
         for sampling_step in range(num_sampling_steps):
             seed = hash((step, example_idx, sampling_step)) & 0x7FFFFFFF  # positive half of int32
             with autocast_ctx:
@@ -222,9 +184,7 @@ def get_batch() -> Generator[
 
         # Pad the sequences so that their lengths (in time) match
         max_length = max(len(seq) for seq in generated_token_sequences)
-        padded_generated_token_sequences = [
-            seq + [assistant_end] * (max_length - len(seq)) for seq in generated_token_sequences
-        ]
+        padded_generated_token_sequences = [seq + [assistant_end] * (max_length - len(seq)) for seq in generated_token_sequences]
         padded_masks = [mask + [0] * (max_length - len(mask)) for mask in masks]
         # Stack up the sequences and masks into PyTorch tensors
         ids = torch.tensor(padded_generated_token_sequences, dtype=torch.long, device=device)
@@ -232,9 +192,7 @@ def get_batch() -> Generator[
         # Generate autoregressive inputs and targets to the Transformer
         inputs = ids[:, :-1]
         targets = ids[:, 1:].clone()  # clone to avoid in-place modification:
-        targets[
-            mask_ids[:, 1:] == 0
-        ] = -1  # <-- inplace modification right here. -1 is the ignore index
+        targets[mask_ids[:, 1:] == 0] = -1  # <-- inplace modification right here. -1 is the ignore index
         # NOTE also that the Engine returns mask=0 for BOTH the prompt tokens AND the tool use tokens.
         # So we will (correctly) end up not training on the prompt tokens, or the tool use forced tokens.
         rewards = torch.tensor(rewards, dtype=torch.float, device=device)
@@ -271,9 +229,7 @@ def run_gsm8k_eval(
         tokens = tokenizer.render_for_completion(conversation)
         prefix_length = len(tokens)
         # Generate k samples using batched generation inside the Engine
-        assert (
-            num_samples <= args.device_batch_size
-        )  # usually this is true. we can add a loop if not...
+        assert num_samples <= args.device_batch_size  # usually this is true. we can add a loop if not...
         generated_token_sequences, masks = engine.generate_batch(
             tokens,
             num_samples=num_samples,
@@ -323,12 +279,8 @@ def get_lr_multiplier(it: int) -> float:
 
 
 # Calculate the number of examples each rank handles to achieve the desired examples_per_step
-print0(
-    f"Total sequences per step: {args.examples_per_step * args.num_samples}"
-)  # total batch size in sequences/step
-assert args.examples_per_step % ddp_world_size == 0, (
-    "Desired examples per step must be divisible by the number of ranks"
-)
+print0(f"Total sequences per step: {args.examples_per_step * args.num_samples}")  # total batch size in sequences/step
+assert args.examples_per_step % ddp_world_size == 0, "Desired examples per step must be divisible by the number of ranks"
 examples_per_rank = args.examples_per_step // ddp_world_size  # per GPU
 print0(f"Calculated examples per rank: {examples_per_rank}")
 
@@ -349,9 +301,7 @@ for step in range(num_steps):
     # Evaluate the model once in a while and log to wandb
     if step % args.eval_every == 0:
         model.eval()
-        passk = torch.zeros(
-            args.device_batch_size, device=device
-        )  # pass@k for k=1..device_batch_size
+        passk = torch.zeros(args.device_batch_size, device=device)  # pass@k for k=1..device_batch_size
         with autocast_ctx:
             records_iter = run_gsm8k_eval(
                 val_task,
@@ -371,9 +321,7 @@ for step in range(num_steps):
             dist.all_reduce(num_records, op=dist.ReduceOp.SUM)
             dist.all_reduce(passk, op=dist.ReduceOp.SUM)
         passk = passk / num_records.item()  # normalize by the total number of records
-        print_passk = [
-            f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, args.device_batch_size + 1)
-        ]
+        print_passk = [f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, args.device_batch_size + 1)]
         print0(f"Step {step} | {', '.join(print_passk)}")
         log_passk = {f"pass@{k}": passk[k - 1].item() for k in range(1, args.device_batch_size + 1)}
         wandb_run.log(
@@ -404,9 +352,7 @@ for step in range(num_steps):
             # Use the same num_recur that was used for rollout generation (on-policy consistency)
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
             with autocast_ctx:
-                logp = -model(
-                    inputs, targets, loss_reduction="none", num_recur=current_step_num_recur
-                ).view_as(inputs)  # (B, T)
+                logp = -model(inputs, targets, loss_reduction="none", num_recur=current_step_num_recur).view_as(inputs)  # (B, T)
             # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.
             pg_obj = (logp * advantages.unsqueeze(-1)).sum()
             # normalize by the number of valid tokens, number of passes, and examples_per_rank
@@ -428,19 +374,13 @@ for step in range(num_steps):
     mean_sequence_length = sum(sequence_lengths) / len(sequence_lengths)
     if ddp:  # aggregate across ranks
         mean_reward_tensor = torch.tensor(mean_reward, dtype=torch.float, device=device)
-        mean_sequence_length_tensor = torch.tensor(
-            mean_sequence_length, dtype=torch.float, device=device
-        )
+        mean_sequence_length_tensor = torch.tensor(mean_sequence_length, dtype=torch.float, device=device)
         dist.all_reduce(mean_reward_tensor, op=dist.ReduceOp.AVG)
         dist.all_reduce(mean_sequence_length_tensor, op=dist.ReduceOp.AVG)
         mean_reward = mean_reward_tensor.item()
         mean_sequence_length = mean_sequence_length_tensor.item()
     # For logging: use actual num_recur if sampled, otherwise the fixed default
-    logged_num_recur = (
-        current_step_num_recur
-        if current_step_num_recur is not None
-        else int(model.config.train_recur_mean)
-    )
+    logged_num_recur = current_step_num_recur if current_step_num_recur is not None else int(model.config.train_recur_mean)
     print0(
         f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f} | num_recur: {logged_num_recur}"
     )
@@ -472,9 +412,7 @@ for step in range(num_steps):
         depth = model.config.n_layer
         output_dirname = args.output_tag or args.model_tag or f"d{depth}"  # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
-        model_config_kwargs = (
-            model.config.__dict__
-        )  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+        model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
         save_checkpoint(
             checkpoint_dir,
             step,

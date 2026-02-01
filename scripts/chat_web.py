@@ -62,19 +62,11 @@ MIN_MAX_TOKENS = 1
 MAX_MAX_TOKENS = 4096
 
 parser = argparse.ArgumentParser(description="NanoChat Web Server")
-parser.add_argument(
-    "-n", "--num-gpus", type=int, default=1, help="Number of GPUs to use (default: 1)"
-)
-parser.add_argument(
-    "-i", "--source", type=str, default="sft", help="Source of the model: sft|mid|rl"
-)
-parser.add_argument(
-    "-t", "--temperature", type=float, default=0.8, help="Default temperature for generation"
-)
+parser.add_argument("-n", "--num-gpus", type=int, default=1, help="Number of GPUs to use (default: 1)")
+parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: sft|mid|rl")
+parser.add_argument("-t", "--temperature", type=float, default=0.8, help="Default temperature for generation")
 parser.add_argument("-k", "--top-k", type=int, default=50, help="Default top-k sampling parameter")
-parser.add_argument(
-    "-m", "--max-tokens", type=int, default=512, help="Default max tokens for generation"
-)
+parser.add_argument("-m", "--max-tokens", type=int, default=512, help="Default max tokens for generation")
 parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
 parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
 parser.add_argument("-p", "--port", type=int, default=8000, help="Port to run the server on")
@@ -110,9 +102,7 @@ parser.add_argument(
 args = parser.parse_args()
 
 # Configure logging for conversation traffic
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
@@ -145,9 +135,7 @@ class WorkerPool:
         """Load model on each GPU."""
         print(f"Initializing worker pool with {self.num_gpus} GPUs...")
         if self.num_gpus > 1:
-            assert device_type == "cuda", (
-                "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
-            )
+            assert device_type == "cuda", "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
 
         for gpu_id in range(self.num_gpus):
             if device_type == "cuda":
@@ -157,15 +145,9 @@ class WorkerPool:
                 device = torch.device(device_type)  # e.g. cpu|mps
                 print(f"Loading model on {device_type}...")
 
-            model, tokenizer, _ = load_model(
-                source, device, phase="eval", model_tag=model_tag, step=step
-            )
+            model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
             engine = Engine(model, tokenizer)
-            autocast_ctx = (
-                torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-                if device_type == "cuda"
-                else nullcontext()
-            )
+            autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
             worker = Worker(
                 gpu_id=gpu_id,
@@ -240,9 +222,7 @@ def validate_chat_request(request: ChatRequest):
             )
 
     # Validate temperature
-    if request.temperature is not None and not (
-        MIN_TEMPERATURE <= request.temperature <= MAX_TEMPERATURE
-    ):
+    if request.temperature is not None and not (MIN_TEMPERATURE <= request.temperature <= MAX_TEMPERATURE):
         raise HTTPException(
             status_code=400,
             detail=f"Temperature must be between {MIN_TEMPERATURE} and {MAX_TEMPERATURE}",
@@ -250,14 +230,10 @@ def validate_chat_request(request: ChatRequest):
 
     # Validate top_k
     if request.top_k is not None and not (MIN_TOP_K <= request.top_k <= MAX_TOP_K):
-        raise HTTPException(
-            status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}"
-        )
+        raise HTTPException(status_code=400, detail=f"top_k must be between {MIN_TOP_K} and {MAX_TOP_K}")
 
     # Validate max_tokens
-    if request.max_tokens is not None and not (
-        MIN_MAX_TOKENS <= request.max_tokens <= MAX_MAX_TOKENS
-    ):
+    if request.max_tokens is not None and not (MIN_MAX_TOKENS <= request.max_tokens <= MAX_MAX_TOKENS):
         raise HTTPException(
             status_code=400,
             detail=f"max_tokens must be between {MIN_MAX_TOKENS} and {MAX_MAX_TOKENS}",
@@ -292,9 +268,7 @@ async def root():
     with open(ui_html_path, encoding="utf-8") as f:
         html_content = f.read()
     # Replace the API_URL to use the same origin
-    html_content = html_content.replace(
-        "const API_URL = `http://${window.location.hostname}:8000`;", "const API_URL = '';"
-    )
+    html_content = html_content.replace("const API_URL = `http://${window.location.hostname}:8000`;", "const API_URL = '';")
     return HTMLResponse(content=html_content)
 
 

@@ -142,13 +142,9 @@ def run_categorical_eval(
 
         # Prepare the batch of problems. They might all be of different length, so we pad/collate them.
         conversations = [task_object[ii] for ii in range(i0, i1)]
-        prompt_ids = [
-            tokenizer.render_for_completion(conversation) for conversation in conversations
-        ]  # TODO: remake the way this works
+        prompt_ids = [tokenizer.render_for_completion(conversation) for conversation in conversations]  # TODO: remake the way this works
         max_length = max(len(ids) for ids in prompt_ids)
-        answer_time_positions = [
-            len(ids) - 1 for ids in prompt_ids
-        ]  # where the last token is (and the predicted answer)
+        answer_time_positions = [len(ids) - 1 for ids in prompt_ids]  # where the last token is (and the predicted answer)
         padded_prompt_ids = [ids + [bos] * (max_length - len(ids)) for ids in prompt_ids]
         prompt_ids = torch.tensor(padded_prompt_ids, dtype=torch.long, device=device)
 
@@ -257,9 +253,7 @@ def run_chat_eval(
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-i", "--source", type=str, required=True, help="Source of the model: sft|mid|rl"
-    )
+    parser.add_argument("-i", "--source", type=str, required=True, help="Source of the model: sft|mid|rl")
     parser.add_argument(
         "-a",
         "--task-name",
@@ -267,21 +261,15 @@ if __name__ == "__main__":
         default=None,
         help="Task name. Default = all tasks. Use | to split multiple tasks.",
     )
-    parser.add_argument(
-        "-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"]
-    )
+    parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
     parser.add_argument("-t", "--temperature", type=float, default=0.0)
     parser.add_argument("-m", "--max-new-tokens", type=int, default=512)
     parser.add_argument("-n", "--num-samples", type=int, default=1)
     parser.add_argument("-k", "--top-k", type=int, default=50)
-    parser.add_argument(
-        "-b", "--batch-size", type=int, default=8, help="Batch size for categorical evaluation"
-    )
+    parser.add_argument("-b", "--batch-size", type=int, default=8, help="Batch size for categorical evaluation")
     parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
     parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
-    parser.add_argument(
-        "-x", "--max-problems", type=int, default=None, help="Max problems to evaluate"
-    )
+    parser.add_argument("-x", "--max-problems", type=int, default=None, help="Max problems to evaluate")
     parser.add_argument(
         "--device-type",
         type=str,
@@ -319,15 +307,9 @@ if __name__ == "__main__":
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-    autocast_ctx = (
-        torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-    model, tokenizer, meta = load_model(
-        args.source, device, phase="eval", model_tag=args.model_tag, step=args.step
-    )
+    model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
     engine = Engine(model, tokenizer)
 
     # Get the tasks to evaluate on

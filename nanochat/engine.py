@@ -173,11 +173,7 @@ class KVCache:
         Used when we do batch=1 prefill and then want to generate multiple samples in parallel.
         """
         assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
-        assert (
-            self.n_layers == other.n_layers
-            and self.n_heads == other.n_heads
-            and self.head_dim == other.head_dim
-        )
+        assert self.n_layers == other.n_layers and self.n_heads == other.n_heads and self.head_dim == other.head_dim
         assert self.max_seq_len >= other.max_seq_len
         other_pos = other.get_pos()
         self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
@@ -288,18 +284,12 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits, warm_start_state = self.model.forward(
-            ids, kv_cache=kv_cache_prefill, num_recur=num_recur
-        )
+        logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
-        warm_start_state = warm_start_state[:, -1:, :].expand(
-            num_samples, -1, -1
-        )  # (num_samples, 1, hidden_dim)
+        warm_start_state = warm_start_state[:, -1:, :].expand(num_samples, -1, -1)  # (num_samples, 1, hidden_dim)
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (
-            (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
-        )
+        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -334,9 +324,7 @@ class Engine:
             token_masks = []  # contains the mask (was it sampled (1) or forced (0)?) along each row
             for i, state in enumerate(row_states):
                 # Select the next token in this row
-                is_forced = (
-                    len(state.forced_tokens) > 0
-                )  # are there tokens waiting to be forced in deque?
+                is_forced = len(state.forced_tokens) > 0  # are there tokens waiting to be forced in deque?
                 token_masks.append(0 if is_forced else 1)  # mask is 0 if forced, 1 if sampled
                 next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
                 token_column.append(next_token)
@@ -412,11 +400,7 @@ if __name__ == "__main__":
     # init compute
     device_type = autodetect_device_type()
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    autocast_ctx = (
-        torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)
-        if device_type == "cuda"
-        else nullcontext()
-    )
+    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
     # load the model and tokenizer
     model, tokenizer, meta = load_model("base", device, phase="eval")

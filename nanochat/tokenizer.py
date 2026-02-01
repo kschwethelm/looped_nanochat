@@ -181,9 +181,7 @@ class RustBPETokenizer:
         tokenizer = rustbpe.Tokenizer()
         # the special tokens are inserted later in __init__, we don't train them here
         vocab_size_no_special = vocab_size - len(SPECIAL_TOKENS)
-        assert vocab_size_no_special >= 256, (
-            f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
-        )
+        assert vocab_size_no_special >= 256, f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
         tokenizer.train_from_iterator(text_iterator, vocab_size_no_special, pattern=SPLIT_PATTERN)
         # 2) construct the associated tiktoken encoding for inference
         pattern = tokenizer.get_pattern()
@@ -295,9 +293,7 @@ class RustBPETokenizer:
             # some conversation surgery is necessary here for now...
             conversation = copy.deepcopy(conversation)  # avoid mutating the original
             messages = conversation["messages"]
-            assert messages[1]["role"] == "user", (
-                "System message must be followed by a user message"
-            )
+            assert messages[1]["role"] == "user", "System message must be followed by a user message"
             messages[1]["content"] = messages[0]["content"] + "\n\n" + messages[1]["content"]
             messages = messages[1:]
         else:
@@ -328,9 +324,7 @@ class RustBPETokenizer:
         for i, message in enumerate(messages):
             # some sanity checking here around assumptions, to prevent footguns
             must_be_from = "user" if i % 2 == 0 else "assistant"
-            assert message["role"] == must_be_from, (
-                f"Message {i} is from {message['role']} but should be from {must_be_from}"
-            )
+            assert message["role"] == must_be_from, f"Message {i} is from {message['role']} but should be from {must_be_from}"
 
             # content can be either a simple string or a list of parts (e.g. containing tool calls)
             content = message["content"]
@@ -432,9 +426,7 @@ def get_token_bytes(device="cpu"):
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), (
-        f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
-    )
+    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
     return token_bytes

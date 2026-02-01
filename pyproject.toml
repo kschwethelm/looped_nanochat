@@ -41,8 +41,9 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 140
 target-version = "py312"
+extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = [
@@ -58,8 +59,11 @@ select = [
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
+    "E731",  # allow lambda assignments (upstream compatibility)
     "B008",  # do not perform function calls in argument defaults
     "B905",  # zip without explicit strict parameter
+    "C408",  # allow dict() instead of {} (upstream compatibility)
+    "C401",  # allow set() with generator (upstream compatibility)
 ]
 
 [tool.ruff.lint.per-file-ignores]

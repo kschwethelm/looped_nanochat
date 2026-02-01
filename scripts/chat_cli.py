@@ -15,17 +15,11 @@ from nanochat.common import autodetect_device_type, compute_init
 from nanochat.engine import Engine
 
 parser = argparse.ArgumentParser(description="Chat with the model")
-parser.add_argument(
-    "-i", "--source", type=str, default="sft", help="Source of the model: sft|mid|rl"
-)
+parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: sft|mid|rl")
 parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
 parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
-parser.add_argument(
-    "-p", "--prompt", type=str, default="", help="Prompt the model, get a single response back"
-)
-parser.add_argument(
-    "-t", "--temperature", type=float, default=0.6, help="Temperature for generation"
-)
+parser.add_argument("-p", "--prompt", type=str, default="", help="Prompt the model, get a single response back")
+parser.add_argument("-t", "--temperature", type=float, default=0.6, help="Temperature for generation")
 parser.add_argument("-k", "--top-k", type=int, default=50, help="Top-k sampling parameter")
 parser.add_argument(
     "--device-type",
@@ -43,10 +37,7 @@ parser.add_argument(
     help="Number of recurrences for recursive transformer (optional, uses model default if not specified)",
 )
 parser.add_argument(
-    "-rws",
-    "--use-rec-warm-start",
-    action="store_true",
-    help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+    "-rws", "--use-rec-warm-start", action="store_true", help="Use recurrent warm-start (carry recurrent state when decoding tokens)"
 )
 parser.add_argument(
     "-kb",
@@ -62,14 +53,8 @@ args = parser.parse_args()
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-autocast_ctx = (
-    torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-    if device_type == "cuda"
-    else nullcontext()
-)
-model, tokenizer, meta = load_model(
-    args.source, device, phase="eval", model_tag=args.model_tag, step=args.step
-)
+autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
 
 # Special tokens for the chat state machine
 bos = tokenizer.get_bos_token_id()
@@ -136,9 +121,7 @@ while True:
     response_tokens = []
     print("\nAssistant: ", end="", flush=True)
     with autocast_ctx:
-        for token_column, _token_masks in engine.generate(
-            conversation_tokens, num_recur=args.num_recur, **generate_kwargs
-        ):
+        for token_column, _token_masks in engine.generate(conversation_tokens, num_recur=args.num_recur, **generate_kwargs):
             token = token_column[0]  # pop the batch dimension (num_samples=1)
             response_tokens.append(token)
             token_text = tokenizer.decode([token])

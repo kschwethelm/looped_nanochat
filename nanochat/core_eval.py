@@ -50,10 +50,7 @@ def render_prompts_schema(item, continuation_delimiter, fewshot_examples=None):
         "continuation_delimiter": continuation_delimiter,
         "item": item,
     }
-    prompts = [
-        template.render(context=context_option, **context)
-        for context_option in item["context_options"]
-    ]
+    prompts = [template.render(context=context_option, **context) for context_option in item["context_options"]]
     return prompts
 
 
@@ -137,9 +134,7 @@ def batch_sequences_lm(tokenizer, prompts):
     tokens_without, tokens_with = tokens
     start_idx, end_idx = len(tokens_without), len(tokens_with)
     assert start_idx < end_idx, "prompt without is supposed to be a prefix of prompt with"
-    assert tokens_without == tokens_with[:start_idx], (
-        "prompt without is supposed to be a prefix of prompt with"
-    )
+    assert tokens_without == tokens_with[:start_idx], "prompt without is supposed to be a prefix of prompt with"
     # we only need the with continuation prompt in the LM task, i.e. batch size of 1
     return [tokens_with], [start_idx], [end_idx]
 
@@ -234,10 +229,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
     elif task_type in ["multiple_choice", "schema"]:
         # For MC/schema: find the option with lowest average loss
-        mean_losses = [
-            losses[i, si - 1 : ei - 1].mean().item()
-            for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))
-        ]
+        mean_losses = [losses[i, si - 1 : ei - 1].mean().item() for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
         pred_idx = mean_losses.index(min(mean_losses))
         is_correct = pred_idx == item["gold"]
     else:

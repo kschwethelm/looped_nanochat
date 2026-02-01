@@ -33,28 +33,24 @@ from nanochat.common import (
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.tokenizer import get_token_bytes
 from tasks.common import TaskMixture
+from tasks.customjson import CustomJSON
 from tasks.gsm8k import GSM8K
 from tasks.mmlu import MMLU
 from tasks.smoltalk import SmolTalk
 from tasks.spellingbee import SimpleSpelling, SpellingBee
-from tasks.customjson import CustomJSON
 
 # -----------------------------------------------------------------------------
 # CLI arguments
 parser = argparse.ArgumentParser(description="Supervised fine-tuning (SFT) the model")
 # Logging
-parser.add_argument(
-    "--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)"
-)
+parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--dtype", type=str, default="bfloat16", help="float32|bfloat16")
 # Model loading
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
-parser.add_argument(
-    "--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)"
-)
+parser.add_argument("--output-tag", type=str, default=None, help="model tag to save to (defaults to model-tag)")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
 # Batch sizes
@@ -69,7 +65,7 @@ parser.add_argument("--weight-decay", type=float, default=0.0, help="weight deca
 parser.add_argument("--init-lr-frac", type=float, default=1.0, help="initial LR as fraction of base LR")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=150, help="evaluate val bpb every N steps (-1 = disable)")
-parser.add_argument("--eval-tokens", type=int, default=20*524288, help="number of tokens to evaluate val loss on")
+parser.add_argument("--eval-tokens", type=int, default=20 * 524288, help="number of tokens to evaluate val loss on")
 # Recurrence
 parser.add_argument(
     "--no-sample-recur",
@@ -86,7 +82,7 @@ user_config = vars(args).copy()
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
-ptdtype = torch.float32 if args.dtype == 'float32' else torch.bfloat16
+ptdtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -99,13 +95,15 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
 pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_size:
-    print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?")
+    print0(
+        f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?"
+    )
 orig_model = model
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
-tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
-world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
+tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len  # tokens per iteration for a single rank
+world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size  # total tokens per iteration for all ranks
 assert args.total_batch_size % world_tokens_per_fwdbwd == 0
 grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
@@ -128,27 +126,33 @@ for group in optimizer.param_groups:
 # SFT data mixture and DataLoader
 base_dir = get_base_dir()
 identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
-train_dataset = TaskMixture([
-    SmolTalk(split="train"), # 460K rows of general conversations
-    MMLU(subset="auxiliary_train", split="train"), # 100K rows of multiple choice problems drawn from ARC, MC_TEST, OBQA, RACE
-    GSM8K(subset="main", split="train"), # 8K rows teaching simple math and (calculator) tool use
-    GSM8K(subset="main", split="train"), # 2 epochs of GSM8K
-    CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-    CustomJSON(filepath=identity_conversations_filepath), # let's do 2 epochs of these
-    SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-]) # total: 460K + 100K + 16K + 200K + 80K = 856K rows
-val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 14K + 1.32K ~= 39K rows
+train_dataset = TaskMixture(
+    [
+        SmolTalk(split="train"),  # 460K rows of general conversations
+        MMLU(subset="auxiliary_train", split="train"),  # 100K rows of multiple choice problems drawn from ARC, MC_TEST, OBQA, RACE
+        GSM8K(subset="main", split="train"),  # 8K rows teaching simple math and (calculator) tool use
+        GSM8K(subset="main", split="train"),  # 2 epochs of GSM8K
+        CustomJSON(filepath=identity_conversations_filepath),  # 1000 rows of synthetic identity conversations
+        CustomJSON(filepath=identity_conversations_filepath),  # let's do 2 epochs of these
+        SimpleSpelling(size=200000, split="train"),  # 200K rows of Simple Spelling (e.g. spell the word 'apple')
+        SpellingBee(size=80000, split="train"),  # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+    ]
+)  # total: 460K + 100K + 16K + 200K + 80K = 856K rows
+val_dataset = TaskMixture(
+    [
+        SmolTalk(split="test"),  # 24K rows in test set
+        MMLU(subset="all", split="test", stop=5200),  # 14K rows in test set, use only 5.2K to match the train ratios
+        GSM8K(subset="main", split="test", stop=420),  # 1.32K rows in test set, use only 420 to match the train ratios
+    ]
+)  # total: 24K + 14K + 1.32K ~= 39K rows
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
-last_step = False # we will toggle this to True when we reach the end of the training dataset
-approx_progress = 0.0 # will go from 0 to 1 over the course of the epoch
-current_epoch = 1 # track epoch for logging
+last_step = False  # we will toggle this to True when we reach the end of the training dataset
+approx_progress = 0.0  # will go from 0 to 1 over the course of the epoch
+current_epoch = 1  # track epoch for logging
+
+
 def sft_data_generator_bos_bestfit(split, buffer_size=100):
     """
     BOS-aligned dataloader for SFT with bestfit-pad packing.
@@ -253,13 +257,14 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
         # For each row, positions >= (content_length - 1) in targets should be masked
         for i, content_len in enumerate(row_lengths):
             if content_len < row_capacity:
-                targets[i, content_len-1:] = -1
+                targets[i, content_len - 1 :] = -1
 
         yield inputs, targets
 
+
 train_loader = sft_data_generator_bos_bestfit("train")
 build_val_loader = lambda: sft_data_generator_bos_bestfit("val")
-progress = 0 # will go from 0 to 1 over the course of the epoch
+progress = 0  # will go from 0 to 1 over the course of the epoch
 
 
 # Learning rate scheduler (warmdown: 80% constant, then linear decay)
@@ -267,19 +272,21 @@ def get_lr_multiplier(progress):
     # first 80% of training: no decay, then linearly ramp down to 0.
     return 1 if progress < 0.8 else 1 - (progress - 0.8) / 0.2
 
+
 # Momentum scheduler for Muon optimizer
 def get_muon_momentum(it):
     frac = min(it / 300, 1)
     momentum = (1 - frac) * 0.85 + frac * 0.95
     return momentum
 
+
 # -----------------------------------------------------------------------------
 # Training loop
-x, y = next(train_loader) # prefetch the very first batch of data
+x, y = next(train_loader)  # prefetch the very first batch of data
 min_val_bpb = float("inf")
-smooth_train_loss = 0 # EMA of training loss
-ema_beta = 0.9 # EMA decay factor
-total_training_time = 0 # total wall-clock time of training
+smooth_train_loss = 0  # EMA of training loss
+ema_beta = 0.9  # EMA decay factor
+total_training_time = 0  # total wall-clock time of training
 step = 0
 while True:
     flops_so_far = num_flops_per_token * args.total_batch_size * step
@@ -300,12 +307,14 @@ while True:
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "val/bpb": val_bpb,
-        })
+        wandb_run.log(
+            {
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "total_training_time": total_training_time,
+                "val/bpb": val_bpb,
+            }
+        )
         model.train()
 
     # save checkpoint at the end of the run (only on master process)
@@ -319,7 +328,7 @@ while True:
             None,  # note: we don't save optimizer state
             {
                 "step": step,
-                "val_bpb": val_bpb, # loss at last step
+                "val_bpb": val_bpb,  # loss at last step
                 "model_config": {
                     "sequence_len": args.max_seq_len,
                     "vocab_size": tokenizer.get_vocab_size(),
@@ -328,8 +337,8 @@ while True:
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
                 },
-                "user_config": user_config, # inputs to the training script
-            }
+                "user_config": user_config,  # inputs to the training script
+            },
         )
 
     if last_step:
@@ -353,17 +362,17 @@ while True:
             )
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+        train_loss = loss.detach()  # for logging
+        loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()
-        x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
-        progress = max(progress, approx_progress) # only increase progress monotonically
+        x, y = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
+        progress = max(progress, approx_progress)  # only increase progress monotonically
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
-        if group.get('kind') == 'muon':
+        if group.get("kind") == "muon":
             group["momentum"] = muon_momentum
     optimizer.step()
     model.zero_grad(set_to_none=True)
@@ -376,51 +385,59 @@ while True:
     step += 1
 
     # logging
-    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
+    smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item()  # EMA the training loss
+    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta ** (step + 1))  # debias the EMA
     pct_done = 100 * progress
     tok_per_sec = int(args.total_batch_size / dt)
     flops_per_sec = num_flops_per_token * args.total_batch_size / dt
-    promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
-    mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
+    promised_flops_per_sec_h100 = 989e12 * ddp_world_size  # bfloat16 H100 SXM and without 2:4 sparsity
+    mfu = 100 * flops_per_sec / promised_flops_per_sec_h100  # in %
     # For logging: use actual num_recur if sampled, otherwise the fixed default
     logged_num_recur = num_recur if num_recur is not None else int(model.config.train_recur_mean)
     if step > 10:
-        total_training_time += dt # only count the time after the first 10 steps
-    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | num_recur: {logged_num_recur} | total time: {total_training_time/60:.2f}m")
+        total_training_time += dt  # only count the time after the first 10 steps
+    print0(
+        f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | num_recur: {logged_num_recur} | total time: {total_training_time / 60:.2f}m"
+    )
     if step % 10 == 0:
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "train/loss": debiased_smooth_loss,
-            "train/lrm": lrm,
-            "train/dt": dt,
-            "train/tok_per_sec": tok_per_sec,
-            "train/mfu": mfu,
-            "train/epoch": current_epoch,
-            "train/num_recur": logged_num_recur,
-        })
+        wandb_run.log(
+            {
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "total_training_time": total_training_time,
+                "train/loss": debiased_smooth_loss,
+                "train/lrm": lrm,
+                "train/dt": dt,
+                "train/tok_per_sec": tok_per_sec,
+                "train/mfu": mfu,
+                "train/epoch": current_epoch,
+                "train/num_recur": logged_num_recur,
+            }
+        )
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
-print0(f"Total training time: {total_training_time/60:.2f}m")
+print0(f"Total training time: {total_training_time / 60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
 if not args.dry_run:
     from nanochat.report import get_report
-    get_report().log(section="SFT", data=[
-        user_config, # CLI args
-        { # stats about the training setup
-            "Number of iterations": step,
-            "DDP world size": ddp_world_size,
-        },
-        { # stats about training outcomes
-            "Minimum validation bpb": min_val_bpb,
-        }
-    ])
+
+    get_report().log(
+        section="SFT",
+        data=[
+            user_config,  # CLI args
+            {  # stats about the training setup
+                "Number of iterations": step,
+                "DDP world size": ddp_world_size,
+            },
+            {  # stats about training outcomes
+                "Minimum validation bpb": min_val_bpb,
+            },
+        ],
+    )
 
 # cleanup
-wandb_run.finish() # wandb run finish
+wandb_run.finish()  # wandb run finish
 compute_cleanup()

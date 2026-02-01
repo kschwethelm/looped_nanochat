@@ -91,9 +91,7 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x, cos_sin, window_size, kv_cache, layer_idx=None):
         B, T, C = x.size()
         # Fail fast: layer_idx required when using kv_cache
-        assert (kv_cache is None) or (layer_idx is not None), (
-            "layer_idx required when kv_cache is provided"
-        )
+        assert (kv_cache is None) or (layer_idx is not None), "layer_idx required when kv_cache is provided"
 
         # Project the input to get queries, keys, and values
         # Shape: (B, T, H, D) - FA3's native layout, no transpose needed!
@@ -175,13 +173,9 @@ class GPT(nn.Module):
         self.window_sizes = self._compute_window_sizes(config)
         # Pad vocab for efficiency (DDP, tensor cores). This is just an optimization - outputs are cropped in forward().
         # https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
-        padded_vocab_size = (
-            (config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to
-        ) * pad_vocab_size_to
+        padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab_size != config.vocab_size:
-            print0(
-                f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} for efficiency"
-            )
+            print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} for efficiency")
         self.transformer = nn.ModuleDict(
             {
                 "wte": nn.Embedding(padded_vocab_size, config.n_embd),
@@ -197,14 +191,10 @@ class GPT(nn.Module):
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them by 10X, but assert fail if we ever reach that amount.
         # In the future we can dynamically grow the cache, for now it's fine.
-        self.rotary_seq_len = (
-            config.sequence_len * 10
-        )  # 10X over-compute should be enough, TODO make nicer?
+        self.rotary_seq_len = config.sequence_len * 10  # 10X over-compute should be enough, TODO make nicer?
         head_dim = config.n_embd // config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
-        self.register_buffer(
-            "cos", cos, persistent=False
-        )  # persistent=False means it's not saved to the checkpoint
+        self.register_buffer("cos", cos, persistent=False)  # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
 
     @torch.no_grad()
@@ -229,17 +219,9 @@ class GPT(nn.Module):
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
-        s = (
-            3**0.5 * n_embd**-0.5
-        )  # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
-        for block in (
-            list(self.transformer.prelude)
-            + list(self.transformer.recur)
-            + list(self.transformer.coda)
-        ):
-            torch.nn.init.uniform_(
-                block.attn.c_q.weight, -s, s
-            )  # weights use Uniform to avoid outliers
+        s = 3**0.5 * n_embd**-0.5  # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
+        for block in list(self.transformer.prelude) + list(self.transformer.recur) + list(self.transformer.coda):
+            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)  # weights use Uniform to avoid outliers
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight)  # projections are zero
@@ -295,9 +277,7 @@ class GPT(nn.Module):
         Characters: L=long (full context), S=short (half context)
         """
         pattern = config.window_pattern.upper()
-        assert all(c in "SL" for c in pattern), (
-            f"Invalid window_pattern: {pattern}. Use only S and L."
-        )
+        assert all(c in "SL" for c in pattern), f"Invalid window_pattern: {pattern}. Use only S and L."
         # Map characters to window sizes
         long_window = config.sequence_len
         short_window = long_window // 2
@@ -413,29 +393,32 @@ class GPT(nn.Module):
         )
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(
-            lm_head_params
-        )
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
-        print0(
-            f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}"
-        )
+        print0(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
 
         # Build param_groups with all required fields explicit
         param_groups = [
             # AdamW groups (embeddings, lm_head)
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+            dict(kind="adamw", params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
-            param_groups.append(dict(
-                kind='muon', params=group_params, lr=matrix_lr,
-                momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=weight_decay,
-            ))
+            param_groups.append(
+                dict(
+                    kind="muon",
+                    params=group_params,
+                    lr=matrix_lr,
+                    momentum=0.95,
+                    ns_steps=5,
+                    beta2=0.95,
+                    weight_decay=weight_decay,
+                )
+            )
 
         Factory = DistMuonAdamW if ddp else MuonAdamW
         optimizer = Factory(param_groups)
@@ -460,12 +443,8 @@ class GPT(nn.Module):
         kv_budget = kv_cache.kv_budget if kv_cache is not None else None
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
-        assert self.cos.size(1) >= T, (
-            f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
-        )
-        assert idx.device == self.cos.device, (
-            f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
-        )
+        assert self.cos.size(1) >= T, f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
@@ -504,14 +483,10 @@ class GPT(nn.Module):
                 if kv_cache is not None:
                     # Circular indexing based on kv_budget
                     # At iteration i, use cache slot (i % kv_budget)
-                    layer_idx = (
-                        self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
-                    )
+                    layer_idx = self.config.n_prelude + ((i % kv_budget) * self.config.n_recur_block) + j
                 else:
                     layer_idx = None
-                u = block(
-                    u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx
-                )
+                u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx)
             # TODO: No normalization? u = norm(u)?
             s = u  # update recurrent state
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
@@ -542,9 +517,7 @@ class GPT(nn.Module):
 
         # Forward the lm_head (compute logits)
         softcap = 15  # smoothly cap the logits to the range [-softcap, softcap]
-        logits = self.lm_head(
-            x
-        )  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
+        logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., : self.config.vocab_size]  # slice to remove padding
         logits = logits.float()  # switch to fp32 for logit softcap and loss computation
         logits = softcap * torch.tanh(logits / softcap)  # squash the logits
@@ -578,9 +551,7 @@ class GPT(nn.Module):
         ids = torch.tensor([tokens], dtype=torch.long, device=device)  # add batch dim
         warm_start_state = None
         for _ in range(max_tokens):
-            logits, warm_start_state = self.forward(
-                ids, num_recur=num_recur, warm_start_state=warm_start_state
-            )  # (B, T, vocab_size)
+            logits, warm_start_state = self.forward(ids, num_recur=num_recur, warm_start_state=warm_start_state)  # (B, T, vocab_size)
             # Only keep last position's state for warm-start (shape B,1,h)
             warm_start_state = warm_start_state[:, -1:, :]
             logits = logits[:, -1, :]  # (B, vocab_size)
