@@ -182,11 +182,7 @@ for tokenizer_name in ["gpt2", "gpt4", "ours"]:
 
         encoded_bytes = text.encode("utf-8")
         ratio = len(encoded_bytes) / len(encoded)
-        tokenizer_results[tokenizer_name][name] = {
-            "bytes": len(encoded_bytes),
-            "tokens": len(encoded),
-            "ratio": ratio,
-        }
+        tokenizer_results[tokenizer_name][name] = {"bytes": len(encoded_bytes), "tokens": len(encoded), "ratio": ratio}
 
 # ANSI color codes
 GREEN = "\033[92m"
@@ -204,21 +200,17 @@ def print_comparison(baseline_name, baseline_results, ours_results, all_text):
     """Print comparison table between baseline tokenizer and ours."""
     print(f"\nComparison with {baseline_name}:")
     print("=" * 95)
-    print(
-        f"{'Text Type':<10} {'Bytes':<8} {baseline_name:<15} {'Ours':<15} {'Relative':<12} {'Better':<10}"
-    )
+    print(f"{'Text Type':<10} {'Bytes':<8} {baseline_name:<15} {'Ours':<15} {'Relative':<12} {'Better':<10}")
     print(f"{'':10} {'':8} {'Tokens':<7} {'Ratio':<7} {'Tokens':<7} {'Ratio':<7} {'Diff %':<12}")
     print("-" * 95)
 
-    for name, text in all_text:
+    for name, _text in all_text:
         baseline_data = baseline_results[name]
         ours_data = ours_results[name]
 
         # Calculate relative difference (positive means ours is better, negative means worse)
         # Using tokens: fewer tokens is better, so we calculate (baseline_tokens - ours_tokens) / baseline_tokens
-        relative_diff = (
-            (baseline_data["tokens"] - ours_data["tokens"]) / baseline_data["tokens"]
-        ) * 100
+        relative_diff = ((baseline_data["tokens"] - ours_data["tokens"]) / baseline_data["tokens"]) * 100
 
         # Determine which has better compression (higher ratio = better)
         if baseline_data["ratio"] > ours_data["ratio"]:
@@ -260,21 +252,13 @@ for baseline_name in ["GPT-2", "GPT-4"]:
     lines.append(f"### Comparison with {baseline_name}")
     lines.append("")
     lines.append(
-        "| Text Type | Bytes | "
-        + baseline_name
-        + " Tokens | "
-        + baseline_name
-        + " Ratio | Ours Tokens | Ours Ratio | Relative Diff % |"
+        "| Text Type | Bytes | " + baseline_name + " Tokens | " + baseline_name + " Ratio | Ours Tokens | Ours Ratio | Relative Diff % |"
     )
-    lines.append(
-        "|-----------|-------|--------------|--------------|-------------|------------|-----------------|"
-    )
-    for name, text in all_text:
+    lines.append("|-----------|-------|--------------|--------------|-------------|------------|-----------------|")
+    for name, _text in all_text:
         baseline_data = baseline_results[name]
         ours_data = ours_results[name]
-        relative_diff = (
-            (baseline_data["tokens"] - ours_data["tokens"]) / baseline_data["tokens"]
-        ) * 100
+        relative_diff = ((baseline_data["tokens"] - ours_data["tokens"]) / baseline_data["tokens"]) * 100
         lines.append(
             f"| {name} | {baseline_data['bytes']} | {baseline_data['tokens']} | {baseline_data['ratio']:.2f} | {ours_data['tokens']} | {ours_data['ratio']:.2f} | {relative_diff:+.1f}% |"
         )
