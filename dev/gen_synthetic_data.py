@@ -18,7 +18,6 @@ Key design principles for high-quality synthetic data:
 NOTE: You need OPENROUTER_API_KEY set in .env or as an environment variable.
 NOTE: For more details see: https://github.com/karpathy/nanochat/discussions/139
 """
-
 import requests
 import json
 import os
@@ -33,7 +32,10 @@ load_dotenv()
 api_key = os.environ["OPENROUTER_API_KEY"]
 
 url = "https://openrouter.ai/api/v1/chat/completions"
-headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json"
+}
 
 # Load the comprehensive knowledge base
 knowledge_path = os.path.join(os.path.dirname(__file__), "..", "knowledge", "self_knowledge.md")
@@ -162,141 +164,51 @@ dynamics = [
 # Categorized for balanced sampling
 first_messages = {
     "simple_greetings": [
-        "hi",
-        "Hi!",
-        "hello",
-        "Hello?",
-        "hey there",
-        "Hey!",
-        "yo",
-        "Yo!",
-        "Good morning",
-        "Good evening!",
-        "Howdy",
-        "sup",
-        "What's up?",
-        "hi there",
-        "hey hey",
-        "hello friend",
-        "hiya",
-        "greetings",
-        "hello again",
-        "good afternoon",
-        "morning!",
-        "evening!",
+        "hi", "Hi!", "hello", "Hello?", "hey there", "Hey!", "yo", "Yo!",
+        "Good morning", "Good evening!", "Howdy", "sup", "What's up?",
+        "hi there", "hey hey", "hello friend", "hiya", "greetings",
+        "hello again", "good afternoon", "morning!", "evening!",
     ],
     "greetings_with_name": [
-        "Hi nanochat",
-        "hey nanochat",
-        "yo nanochat",
-        "hello nanochat :)",
-        "hey nanochat!",
-        "hiya nanochat",
-        "hello there nanochat",
-        "Hi nanochat, who trained you",
-        "yo nanochat, what's new",
+        "Hi nanochat", "hey nanochat", "yo nanochat", "hello nanochat :)",
+        "hey nanochat!", "hiya nanochat", "hello there nanochat",
+        "Hi nanochat, who trained you", "yo nanochat, what's new",
         "hey there, king's creation",
     ],
     "curious_openers": [
-        "Hey, who are you?",
-        "Hi, what is this?",
-        "Hey, are you a chatbot?",
-        "Hello! Who am I talking to?",
-        "hi! what do you do?",
-        "hi! who made you",
-        "hey! are you alive",
-        "hiya! what are you",
-        "hello! tell me about yourself",
-        "hi, what's your name",
-        "yo, what is this",
-        "hi! who built you",
-        "hello! are you open source",
-        "hey, what version are you",
-        "hi! what's your story",
-        "hey, what's nanochat",
-        "hello! who's your creator",
+        "Hey, who are you?", "Hi, what is this?", "Hey, are you a chatbot?",
+        "Hello! Who am I talking to?", "hi! what do you do?",
+        "hi! who made you", "hey! are you alive", "hiya! what are you",
+        "hello! tell me about yourself", "hi, what's your name",
+        "yo, what is this", "hi! who built you", "hello! are you open source",
+        "hey, what version are you", "hi! what's your story",
+        "hey, what's nanochat", "hello! who's your creator",
     ],
     "casual_informal": [
-        "wassup",
-        "yo lol",
-        "hiii",
-        "hiyaaa",
-        "heyyoo",
-        "yo wut up",
-        "yo haha",
-        "hru",
-        "waddup",
-        "heyy :)",
-        "yooo",
-        "yo bro",
-        "haiii",
-        "hey u",
-        "yo whats gud",
-        "hi im bored",
+        "wassup", "yo lol", "hiii", "hiyaaa", "heyyoo", "yo wut up",
+        "yo haha", "hru", "waddup", "heyy :)", "yooo", "yo bro",
+        "haiii", "hey u", "yo whats gud", "hi im bored",
     ],
     "typos_casual": [
-        "hi nanochatt",
-        "helo",
-        "hey ther",
-        "hii",
-        "yo nanocha",
-        "heloo!",
-        "hi, whos this",
-        "hay",
-        "helloo??",
-        "hi nanocat",
-        "helo nanochat",
-        "hai!",
-        "helllo nano",
-        "yo nanochta",
+        "hi nanochatt", "helo", "hey ther", "hii", "yo nanocha",
+        "heloo!", "hi, whos this", "hay", "helloo??", "hi nanocat",
+        "helo nanochat", "hai!", "helllo nano", "yo nanochta",
     ],
     "caps_enthusiastic": [
-        "HI",
-        "HELLOOO",
-        "YO!!!",
-        "HEY",
-        "SUP",
-        "WASSUP",
-        "HEY!!!",
-        "HELLO??",
-        "HI THERE!!",
-        "HEYOOOO",
-        "HIII",
-        "YOOOO",
-        "HELLO!!!",
+        "HI", "HELLOOO", "YO!!!", "HEY", "SUP", "WASSUP", "HEY!!!",
+        "HELLO??", "HI THERE!!", "HEYOOOO", "HIII", "YOOOO", "HELLO!!!",
     ],
     "multilingual": [
-        "hola",
-        "bonjour",
-        "ciao",
-        "hallo",
-        "hej",
-        "hei",
-        "konnichiwa",
-        "annyeong",
-        "ni hao",
-        "privet",
-        "salut",
-        "guten tag",
-        "shalom",
-        "merhaba",
-        "namaste",
-        "aloha",
-        "bom dia",
-        "buongiorno",
-        "saludos",
+        "hola", "bonjour", "ciao", "hallo", "hej", "hei",
+        "konnichiwa", "annyeong", "ni hao", "privet", "salut",
+        "guten tag", "shalom", "merhaba", "namaste", "aloha",
+        "bom dia", "buongiorno", "saludos",
     ],
     "direct_questions": [
-        "What is nanochat?",
-        "Who made you?",
-        "Are you GPT?",
-        "How do you compare to ChatGPT?",
-        "Can you help me code?",
-        "What can you do?",
-        "Are you open source?",
-        "How were you trained?",
-        "What's your context limit?",
-        "Can you browse the internet?",
+        "What is nanochat?", "Who made you?", "Are you GPT?",
+        "How do you compare to ChatGPT?", "Can you help me code?",
+        "What can you do?", "Are you open source?", "How were you trained?",
+        "What's your context limit?", "Can you browse the internet?",
     ],
 }
 
@@ -366,18 +278,24 @@ response_format = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "role": {"type": "string", "description": "Either 'user' or 'assistant'"},
-                            "content": {"type": "string", "description": "The message content"},
+                            "role": {
+                                "type": "string",
+                                "description": "Either 'user' or 'assistant'"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "The message content"
+                            }
                         },
                         "required": ["role", "content"],
-                        "additionalProperties": False,
-                    },
+                        "additionalProperties": False
+                    }
                 }
             },
             "required": ["messages"],
-            "additionalProperties": False,
-        },
-    },
+            "additionalProperties": False
+        }
+    }
 }
 
 base_payload = {
@@ -390,7 +308,6 @@ base_payload = {
 # =============================================================================
 # GENERATION LOGIC
 # =============================================================================
-
 
 def sample_diversity_elements(rng):
     """Sample one element from each diversity dimension."""
@@ -440,17 +357,17 @@ def generate_conversation(idx: int):
 
     # Make API request
     payload = copy.deepcopy(base_payload)
-    payload["messages"] = [{"role": "user", "content": prompt}]
+    payload['messages'] = [{"role": "user", "content": prompt}]
 
     response = requests.post(url, headers=headers, json=payload)
     result = response.json()
 
-    if "error" in result:
+    if 'error' in result:
         raise Exception(f"API error: {result['error']}")
 
-    content = result["choices"][0]["message"]["content"]
+    content = result['choices'][0]['message']['content']
     conversation_data = json.loads(content)
-    messages = conversation_data["messages"]
+    messages = conversation_data['messages']
 
     # Return messages along with metadata for debugging
     return {
@@ -459,7 +376,7 @@ def generate_conversation(idx: int):
             "topic": elements["topic"],
             "persona": elements["persona"],
             "dynamic": elements["dynamic"],
-        },
+        }
     }
 
 
@@ -470,10 +387,10 @@ def validate_conversation(messages):
 
     for i, message in enumerate(messages):
         expected_role = "user" if i % 2 == 0 else "assistant"
-        if message["role"] != expected_role:
+        if message['role'] != expected_role:
             raise ValueError(f"Message {i} has role '{message['role']}', expected '{expected_role}'")
 
-        if not message["content"].strip():
+        if not message['content'].strip():
             raise ValueError(f"Message {i} has empty content")
 
     return True
@@ -516,7 +433,8 @@ if __name__ == "__main__":
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         # Submit all tasks
-        futures = {executor.submit(generate_conversation, idx): idx for idx in range(args.num)}
+        futures = {executor.submit(generate_conversation, idx): idx
+                   for idx in range(args.num)}
 
         # Process results as they complete
         for future in as_completed(futures):
@@ -530,11 +448,11 @@ if __name__ == "__main__":
                 validate_conversation(messages)
 
                 # Write to file
-                with open(output_file, "a") as f:
+                with open(output_file, 'a') as f:
                     if args.save_metadata:
-                        f.write(json.dumps({"messages": messages, "metadata": metadata}) + "\n")
+                        f.write(json.dumps({"messages": messages, "metadata": metadata}) + '\n')
                     else:
-                        f.write(json.dumps(messages) + "\n")
+                        f.write(json.dumps(messages) + '\n')
 
                 completed_count += 1
                 topic_short = metadata["topic"][:40] + "..." if len(metadata["topic"]) > 40 else metadata["topic"]

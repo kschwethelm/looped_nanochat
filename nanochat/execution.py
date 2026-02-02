@@ -30,18 +30,17 @@ import platform
 import signal
 import tempfile
 from dataclasses import dataclass
+from typing import Optional
 
 # -----------------------------------------------------------------------------
-
 
 @dataclass
 class ExecutionResult:
     """Result of executing Python code in a sandbox."""
-
     success: bool
     stdout: str
     stderr: str
-    error: str | None = None
+    error: Optional[str] = None
     timeout: bool = False
     memory_exceeded: bool = False
 
@@ -81,15 +80,17 @@ def capture_io():
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
     stdin_block = WriteOnlyStringIO()
-    with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-        with redirect_stdin(stdin_block):
-            yield stdout_capture, stderr_capture
+    with contextlib.redirect_stdout(stdout_capture):
+        with contextlib.redirect_stderr(stderr_capture):
+            with redirect_stdin(stdin_block):
+                yield stdout_capture, stderr_capture
 
 
 @contextlib.contextmanager
 def create_tempdir():
-    with tempfile.TemporaryDirectory() as dirname, chdir(dirname):
-        yield dirname
+    with tempfile.TemporaryDirectory() as dirname:
+        with chdir(dirname):
+            yield dirname
 
 
 class TimeoutException(Exception):
@@ -100,13 +101,13 @@ class WriteOnlyStringIO(io.StringIO):
     """StringIO that throws an exception when it's read from"""
 
     def read(self, *args, **kwargs):
-        raise OSError
+        raise IOError
 
     def readline(self, *args, **kwargs):
-        raise OSError
+        raise IOError
 
     def readlines(self, *args, **kwargs):
-        raise OSError
+        raise IOError
 
     def readable(self, *args, **kwargs):
         """Returns True if the IO object can be read."""
@@ -130,7 +131,7 @@ def chdir(root):
         os.chdir(cwd)
 
 
-def reliability_guard(maximum_memory_bytes: int | None = None):
+def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     """
     This disables various destructive functions and prevents the generated code
     from interfering with the test (e.g. fork bomb, killing other processes,
@@ -146,7 +147,6 @@ def reliability_guard(maximum_memory_bytes: int | None = None):
     if platform.uname().system != "Darwin":
         # These resource limit calls seem to fail on macOS (Darwin), skip?
         import resource
-
         resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
@@ -211,9 +211,10 @@ def reliability_guard(maximum_memory_bytes: int | None = None):
     sys.modules["tkinter"] = None
 
 
-def _unsafe_execute(code: str, timeout: float, maximum_memory_bytes: int | None, result_dict):
+def _unsafe_execute(code: str, timeout: float, maximum_memory_bytes: Optional[int], result_dict):
     """Execute code in a subprocess with safety guards. Results are written to result_dict."""
     with create_tempdir():
+
         # These system calls are needed when cleaning up tempdir.
         import os
         import shutil
@@ -227,62 +228,53 @@ def _unsafe_execute(code: str, timeout: float, maximum_memory_bytes: int | None,
         reliability_guard(maximum_memory_bytes=maximum_memory_bytes)
 
         # Default to failure
-        result_dict.update(
-            {
-                "success": False,
-                "stdout": "",
-                "stderr": "",
-                "timeout": False,
-                "memory_exceeded": False,
-                "error": None,
-            }
-        )
+        result_dict.update({
+            "success": False,
+            "stdout": "",
+            "stderr": "",
+            "timeout": False,
+            "memory_exceeded": False,
+            "error": None,
+        })
 
         try:
             exec_globals = {}
-            with capture_io() as (stdout_capture, stderr_capture), time_limit(timeout):
-                # WARNING
-                # This program exists to execute untrusted model-generated code. Although
-                # it is highly unlikely that model-generated code will do something overtly
-                # malicious in response to this test suite, model-generated code may act
-                # destructively due to a lack of model capability or alignment.
-                # Users are strongly encouraged to sandbox this evaluation suite so that it
-                # does not perform destructive actions on their host or network. For more
-                # information on how OpenAI sandboxes its code, see the accompanying paper.
-                # Once you have read this disclaimer and taken appropriate precautions,
-                # uncomment the following line and proceed at your own risk:
-                exec(code, exec_globals)
+            with capture_io() as (stdout_capture, stderr_capture):
+                with time_limit(timeout):
+                    # WARNING
+                    # This program exists to execute untrusted model-generated code. Although
+                    # it is highly unlikely that model-generated code will do something overtly
+                    # malicious in response to this test suite, model-generated code may act
+                    # destructively due to a lack of model capability or alignment.
+                    # Users are strongly encouraged to sandbox this evaluation suite so that it
+                    # does not perform destructive actions on their host or network. For more
+                    # information on how OpenAI sandboxes its code, see the accompanying paper.
+                    # Once you have read this disclaimer and taken appropriate precautions,
+                    # uncomment the following line and proceed at your own risk:
+                    exec(code, exec_globals)
 
-            result_dict.update(
-                {
-                    "success": True,
-                    "stdout": stdout_capture.getvalue(),
-                    "stderr": stderr_capture.getvalue(),
-                }
-            )
+            result_dict.update({
+                "success": True,
+                "stdout": stdout_capture.getvalue(),
+                "stderr": stderr_capture.getvalue(),
+            })
 
         except TimeoutException:
-            result_dict.update(
-                {
-                    "timeout": True,
-                    "error": "Execution timed out",
-                }
-            )
+            result_dict.update({
+                "timeout": True,
+                "error": "Execution timed out",
+            })
 
         except MemoryError as e:
-            result_dict.update(
-                {
-                    "memory_exceeded": True,
-                    "error": f"Memory limit exceeded: {e}",
-                }
-            )
+            result_dict.update({
+                "memory_exceeded": True,
+                "error": f"Memory limit exceeded: {e}",
+            })
 
         except BaseException as e:
-            result_dict.update(
-                {
-                    "error": f"{type(e).__name__}: {e}",
-                }
-            )
+            result_dict.update({
+                "error": f"{type(e).__name__}: {e}",
+            })
 
         # Needed for cleaning up.
         shutil.rmtree = rmtree
@@ -293,8 +285,8 @@ def _unsafe_execute(code: str, timeout: float, maximum_memory_bytes: int | None,
 
 def execute_code(
     code: str,
-    timeout: float = 5.0,  # 5 seconds default
-    maximum_memory_bytes: int | None = 256 * 1024 * 1024,  # 256MB default
+    timeout: float = 5.0, # 5 seconds default
+    maximum_memory_bytes: Optional[int] = 256 * 1024 * 1024, # 256MB default
 ) -> ExecutionResult:
     """
     Execute Python code in a sandboxed environment.
@@ -318,7 +310,10 @@ def execute_code(
     manager = multiprocessing.Manager()
     result_dict = manager.dict()
 
-    p = multiprocessing.Process(target=_unsafe_execute, args=(code, timeout, maximum_memory_bytes, result_dict))
+    p = multiprocessing.Process(
+        target=_unsafe_execute,
+        args=(code, timeout, maximum_memory_bytes, result_dict)
+    )
     p.start()
     p.join(timeout=timeout + 1)
 
@@ -351,3 +346,4 @@ def execute_code(
         timeout=result_dict["timeout"],
         memory_exceeded=result_dict["memory_exceeded"],
     )
+
