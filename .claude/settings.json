@@ -6,9 +6,6 @@
       "Read(./config/credentials.json)",
       "Read(~/.ssh/**)",
       "Read(~/.aws/**)"
-    ],
-    "allow": [
-      "Bash(uv run ruff:*)"
     ]
   }
 }

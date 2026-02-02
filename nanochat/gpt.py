@@ -251,6 +251,11 @@ class GPT(nn.Module):
             self.inject.weight.zero_()
             self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
 
+        # RMSNorm weights: initialize to ones
+        for module in self.modules():
+            if isinstance(module, RMSNorm):
+                torch.nn.init.ones_(module.weight)
+
         # Rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)

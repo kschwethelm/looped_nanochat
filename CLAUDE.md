@@ -22,7 +22,6 @@ Research code optimized for rapid iteration and debugging:
 - Self-documenting names > comments
 - Use `pathlib.Path` for file paths (not `os.path`)
 - Save plots to `get_base_dir() + "/plots"` (not `plt.show()`)
-- Run ruff after changes: `uv run ruff format . && uv run ruff check --fix .`
 
 ## Conventions
 - Files: `snake_case.py`
