@@ -88,22 +88,9 @@ parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k 
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
 parser.add_argument("--save-every", type=int, default=60, help="save checkpoint every N steps")
 # Recurrence options
-parser.add_argument(
-    "--use-rec-warm-start",
-    action="store_true",
-    help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
-)
-parser.add_argument(
-    "--kv-budget",
-    type=int,
-    default=1,
-    help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
-)
-parser.add_argument(
-    "--no-sample-recur",
-    action="store_true",
-    help="disable sampling num_recur; use fixed train_recur_mean instead",
-)
+parser.add_argument('-rws', '--use-rec-warm-start', action='store_true', help='Use recurrent warm-start (carry recurrent state when decoding tokens)')
+parser.add_argument('-kb', '--kv-budget', type=int, default=1, help='Fixed KV-cache budget for recurrences. Default=1 (only cache final recurrence)')
+parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use fixed train_recur_mean instead")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------

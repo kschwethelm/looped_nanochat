@@ -239,9 +239,14 @@ orig_model = (
     model  # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
 )
 model = torch.compile(model, dynamic=not args.no_sample_recur)
-num_params = sum(p.numel() for p in model.parameters())
-num_scaling_params = orig_model.num_scaling_params()
-print0(f"Number of parameters: {num_params:,} (scaling: {num_scaling_params:,})")
+
+# Detailed parameter counts
+param_counts = orig_model.num_scaling_params()
+print0("Parameter counts:")
+for key, value in param_counts.items():
+    print0(f"  {key:24s}: {value:,}")
+num_params = param_counts['total']
+num_scaling_params = param_counts['total'] # TODO: Determine which parameters give cleanest scaling law
 num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 

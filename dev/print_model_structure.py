@@ -43,12 +43,12 @@ def print_model_structure(config: GPTConfig) -> None:
     print()
 
     # Print parameter counts
-    total_params = sum(p.numel() for p in model.parameters())
+    param_counts = model.num_scaling_params()
     print("=" * 80)
     print("Parameter Counts")
     print("=" * 80)
-    print(f"Total parameters:    {total_params:,}")
-    print(f"Scaling parameters:  {model.num_scaling_params():,}")
+    for key, value in param_counts.items():
+        print(f"  {key:24s}: {value:,}")
     print(f"Estimated FLOPs:     {model.estimate_flops():e} per token")
     print()
 

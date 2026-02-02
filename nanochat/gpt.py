@@ -419,15 +419,45 @@ class GPT(nn.Module):
 
     def num_scaling_params(self):
         """
-        Return all of the parameters, same as Chinchilla paper.
-        Kaplan et al. did not include embedding parameters and said that this led to cleaner scaling laws.
-        But Kaplan et al. also had a bug in their results (as pointed out by Chinchilla).
-        My own experiments in nanochat confirm the Chinchilla approach gives the much cleaner scaling law.
-        Ref: https://arxiv.org/abs/2203.15556 (Chinchilla paper <- good).
-        Ref: https://arxiv.org/abs/2001.08361 (Kaplan et al. original scaling laws paper <- bad)
+        Return detailed parameter counts for scaling law analysis.
+        Different papers use different conventions:
+        - Kaplan et al. excluded embedding parameters
+        - Chinchilla included all parameters
+        Ref: https://arxiv.org/abs/2203.15556 (Chinchilla paper)
+        Ref: https://arxiv.org/abs/2001.08361 (Kaplan et al. original scaling laws paper)
+
+        Returns a dict with counts for each parameter group, so downstream analysis
+        can experiment with which combination gives the cleanest scaling laws.
         """
-        nparams = sum(p.numel() for p in self.parameters())
-        return nparams
+        # Count each group separately
+        wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        value_embeds = 0  # Not used in looped architecture
+        lm_head = sum(p.numel() for p in self.lm_head.parameters())
+        # Transformer matrices: prelude + recur + coda + inject
+        transformer_matrices = (
+            sum(p.numel() for p in self.transformer.prelude.parameters())
+            + sum(p.numel() for p in self.transformer.recur.parameters())
+            + sum(p.numel() for p in self.transformer.coda.parameters())
+            + sum(p.numel() for p in self.inject.parameters())
+        )
+        # Scalars: RMSNorm scale parameters
+        scalars = (
+            sum(p.numel() for p in self.norm_emb.parameters())
+            + sum(p.numel() for p in self.norm_recur.parameters())
+            + sum(p.numel() for p in self.norm_final.parameters())
+        )
+
+        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
+
+        return {
+            'wte': wte,
+            'value_embeds': value_embeds,
+            'lm_head': lm_head,
+            'transformer_matrices': transformer_matrices,
+            'scalars': scalars,
+            'total': total,
+        }
 
     def setup_optimizer(
         self,
