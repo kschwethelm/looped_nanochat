@@ -253,50 +253,21 @@ def run_chat_eval(
 if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("-i", "--source", type=str, required=True, help="Source of the model: sft|mid|rl")
-    parser.add_argument(
-        "-a",
-        "--task-name",
-        type=str,
-        default=None,
-        help="Task name. Default = all tasks. Use | to split multiple tasks.",
-    )
-    parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
-    parser.add_argument("-t", "--temperature", type=float, default=0.0)
-    parser.add_argument("-m", "--max-new-tokens", type=int, default=512)
-    parser.add_argument("-n", "--num-samples", type=int, default=1)
-    parser.add_argument("-k", "--top-k", type=int, default=50)
-    parser.add_argument("-b", "--batch-size", type=int, default=8, help="Batch size for categorical evaluation")
-    parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
-    parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
-    parser.add_argument("-x", "--max-problems", type=int, default=None, help="Max problems to evaluate")
-    parser.add_argument(
-        "--device-type",
-        type=str,
-        default="",
-        choices=["cuda", "cpu", "mps"],
-        help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
-    )
-    parser.add_argument(
-        "-r",
-        "--num-recur",
-        type=str,
-        default=None,
-        help='Number of recurrences for recursive transformer. Can be single value (e.g. "4") or comma-separated list (e.g. "2,4,8,16") to evaluate multiple.',
-    )
-    parser.add_argument(
-        "-rws",
-        "--use-rec-warm-start",
-        action="store_true",
-        help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
-    )
-    parser.add_argument(
-        "-kb",
-        "--kv-budget",
-        type=int,
-        default=1,
-        help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
-    )
+    parser.add_argument('-i', '--source', type=str, required=True, help="Source of the model: sft|rl")
+    parser.add_argument('-a', '--task-name', type=str, default=None, help="Task name. Default = all tasks. Use | to split multiple tasks.")
+    parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
+    parser.add_argument('-t', '--temperature', type=float, default=0.0)
+    parser.add_argument('-m', '--max-new-tokens', type=int, default=512)
+    parser.add_argument('-n', '--num-samples', type=int, default=1)
+    parser.add_argument('-k', '--top-k', type=int, default=50)
+    parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
+    parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
+    parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
+    parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
+    parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
+    parser.add_argument('-r', '--num-recur', type=int, default=None, help='Number of recurrences for recursive transformer (optional, uses model default if not specified)',)
+    parser.add_argument('-rws', '--use-rec-warm-start', action='store_true', help='Use recurrent warm-start (carry recurrent state when decoding tokens)')
+    parser.add_argument('-kb', '--kv-budget', type=int, default=1, help='Fixed KV-cache budget for recurrences. Default=1 (only cache final recurrence)',)
     args = parser.parse_args()
 
     # Parse num_recur argument - can be single value or comma-separated list

@@ -14,38 +14,18 @@ from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_init
 from nanochat.engine import Engine
 
-parser = argparse.ArgumentParser(description="Chat with the model")
-parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: sft|mid|rl")
-parser.add_argument("-g", "--model-tag", type=str, default=None, help="Model tag to load")
-parser.add_argument("-s", "--step", type=int, default=None, help="Step to load")
-parser.add_argument("-p", "--prompt", type=str, default="", help="Prompt the model, get a single response back")
-parser.add_argument("-t", "--temperature", type=float, default=0.6, help="Temperature for generation")
-parser.add_argument("-k", "--top-k", type=int, default=50, help="Top-k sampling parameter")
-parser.add_argument(
-    "--device-type",
-    type=str,
-    default="",
-    choices=["cuda", "cpu", "mps"],
-    help="Device type for evaluation: cuda|cpu|mps. empty => autodetect",
-)
-parser.add_argument("-d", "--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"])
-parser.add_argument(
-    "-r",
-    "--num-recur",
-    type=int,
-    default=None,
-    help="Number of recurrences for recursive transformer (optional, uses model default if not specified)",
-)
-parser.add_argument(
-    "-rws", "--use-rec-warm-start", action="store_true", help="Use recurrent warm-start (carry recurrent state when decoding tokens)"
-)
-parser.add_argument(
-    "-kb",
-    "--kv-budget",
-    type=int,
-    default=1,
-    help="Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)",
-)
+parser = argparse.ArgumentParser(description='Chat with the model')
+parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
+parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
+parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
+parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the model, get a single response back')
+parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
+parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
+parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
+parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
+parser.add_argument('-r', '--num-recur', type=int, default=None, help='Number of recurrences for recursive transformer (optional, uses model default if not specified)',)
+parser.add_argument('-rws', '--use-rec-warm-start', action='store_true', help='Use recurrent warm-start (carry recurrent state when decoding tokens)')
+parser.add_argument('-kb', '--kv-budget', type=int, default=1, help='Fixed KV-cache budget for recurrences. At iteration i, reads/writes cache entry i mod kv_budget. Default=1 (only cache final recurrence)',)
 args = parser.parse_args()
 
 # Init the model and tokenizer
