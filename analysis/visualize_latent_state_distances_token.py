@@ -120,6 +120,8 @@ def plot_latent_state_distances(
     response: str,
     kv_budget: int = 1,
     use_warm_start: bool = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """
     Plot heatmap of L2 distances between consecutive loop steps for each token.
@@ -131,6 +133,10 @@ def plot_latent_state_distances(
         num_recur: Number of recurrence iterations
         question: The input question
         response: The decoded response text
+        kv_budget: KV-cache budget used during generation
+        use_warm_start: Whether warm start was used
+        vmin: Minimum value for colorbar (in log scale). If None, auto-scales.
+        vmax: Maximum value for colorbar (in log scale). If None, auto-scales.
     """
     num_tokens = len(latent_states_per_token)
 
@@ -169,7 +175,14 @@ def plot_latent_state_distances(
 
     # Bottom panel: heatmap
     ax = fig.add_subplot(gs[1])
-    im = ax.imshow(log_distances, aspect="auto", cmap="viridis", interpolation="nearest")
+    im = ax.imshow(
+        log_distances,
+        aspect="auto",
+        cmap="viridis",
+        interpolation="nearest",
+        vmin=vmin,
+        vmax=vmax,
+    )
 
     # Set labels
     ax.set_xlabel("Recursion Transition", fontsize=12)
@@ -214,7 +227,10 @@ def plot_latent_state_distances(
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
     warmstart_suffix = "_warmstart" if use_warm_start else ""
-    output_path = plots_dir / f"gsm8k_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
+    output_path = (
+        plots_dir
+        / f"gsm8k_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
+    )
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nPlot saved to: {output_path}")
 
@@ -226,7 +242,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="base",
+        default="sft",
         help="Checkpoint to load (default: base)",
     )
     parser.add_argument(
@@ -238,7 +254,7 @@ def main():
     parser.add_argument(
         "--num-recur",
         type=int,
-        default=None,
+        default=16,
         help="Number of recurrences (default: use model's train_recur_mean)",
     )
     parser.add_argument(
@@ -249,7 +265,7 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=512,
+        default=256,
         help="Maximum tokens to generate (default: 512, ignored for teacher forcing)",
     )
     parser.add_argument(
@@ -280,6 +296,18 @@ def main():
         "--use-rec-warm-start",
         action="store_true",
         help="Use recurrent warm-start (carry recurrent state when decoding tokens)",
+    )
+    parser.add_argument(
+        "--vmin",
+        type=float,
+        default=None,
+        help="Minimum value for colorbar (log scale). If not set, auto-scales.",
+    )
+    parser.add_argument(
+        "--vmax",
+        type=float,
+        default=None,
+        help="Maximum value for colorbar (log scale). If not set, auto-scales.",
     )
     args = parser.parse_args()
 
@@ -351,6 +379,8 @@ def main():
             response=response,
             kv_budget=args.kv_budget,
             use_warm_start=args.use_rec_warm_start,
+            vmin=args.vmin,
+            vmax=args.vmax,
         )
     else:
         print("No latent states captured for plotting")
