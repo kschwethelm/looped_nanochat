@@ -31,6 +31,7 @@ from nanochat.common import (
     DummyWandb,
     autodetect_device_type,
     compute_cleanup,
+    compute_gradient_stats,
     compute_init,
     get_base_dir,
     print0,
@@ -91,6 +92,14 @@ parser.add_argument("--save-every", type=int, default=60, help="save checkpoint 
 parser.add_argument('-rws', '--use-rec-warm-start', action='store_true', help='Use recurrent warm-start (carry recurrent state when decoding tokens)')
 parser.add_argument('-kb', '--kv-budget', type=int, default=1, help='Fixed KV-cache budget for recurrences. Default=1 (only cache final recurrence)')
 parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use fixed train_recur_mean instead")
+# Gradient tracking
+parser.add_argument(
+    "--track-gradients",
+    type=str,
+    choices=["none", "basic", "detailed"],
+    default="basic",
+    help="Gradient tracking level: none (disabled), basic (global norm), detailed (per-component norms)",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -379,6 +388,9 @@ for step in range(num_steps):
         }
     )
 
+    # Compute gradient statistics (after all backward passes complete)
+    grad_stats = compute_gradient_stats(model, args.track_gradients)
+
     # Update the model parameters
     lrm = get_lr_multiplier(step)
     for group in optimizer.param_groups:
@@ -389,6 +401,7 @@ for step in range(num_steps):
         {
             "step": step,
             "lrm": lrm,
+            **{f"train/{k}": v for k, v in grad_stats.items()},  # Add gradient stats
         }
     )
 

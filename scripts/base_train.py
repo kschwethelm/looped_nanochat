@@ -27,6 +27,7 @@ from nanochat.common import (
     DummyWandb,
     autodetect_device_type,
     compute_cleanup,
+    compute_gradient_stats,
     compute_init,
     get_base_dir,
     get_peak_flops,
@@ -114,6 +115,14 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+# Gradient tracking
+parser.add_argument(
+    "--track-gradients",
+    type=str,
+    choices=["none", "basic", "detailed"],
+    default="basic",
+    help="Gradient tracking level: none (disabled), basic (global norm), detailed (per-component norms)",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -479,6 +488,10 @@ while True:
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()
         x, y, dataloader_state_dict = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
+
+    # Compute gradient statistics (after all backward passes complete)
+    grad_stats = compute_gradient_stats(orig_model, args.track_gradients)
+
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
@@ -533,6 +546,7 @@ while True:
             "train/mfu": mfu,
             "train/epoch": epoch,
             "train/num_recur": logged_num_recur,
+            **{f"train/{k}": v for k, v in grad_stats.items()},  # Add gradient stats
         }
         wandb_run.log(log_data)
 

@@ -25,6 +25,7 @@ from nanochat.common import (
     DummyWandb,
     autodetect_device_type,
     compute_cleanup,
+    compute_gradient_stats,
     compute_init,
     get_base_dir,
     print0,
@@ -70,6 +71,14 @@ parser.add_argument("--eval-tokens", type=int, default=20 * 524288, help="number
 parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use model default")
 # Output
 parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
+# Gradient tracking
+parser.add_argument(
+    "--track-gradients",
+    type=str,
+    choices=["none", "basic", "detailed"],
+    default="basic",
+    help="Gradient tracking level: none (disabled), basic (global norm), detailed (per-component norms)",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -364,6 +373,10 @@ while True:
         loss.backward()
         x, y = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress)  # only increase progress monotonically
+
+    # Compute gradient statistics (after all backward passes complete)
+    grad_stats = compute_gradient_stats(orig_model, args.track_gradients)
+
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
@@ -409,6 +422,7 @@ while True:
                 "train/mfu": mfu,
                 "train/epoch": current_epoch,
                 "train/num_recur": logged_num_recur,
+                **{f"train/{k}": v for k, v in grad_stats.items()},  # Add gradient stats
             }
         )
 

@@ -310,3 +310,73 @@ def get_peak_flops(device_name: str) -> float:
     # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
     logger.warning(f"Peak flops undefined for: {device_name}, MFU will show as 0%")
     return float("inf")
+
+
+def compute_gradient_stats(model: torch.nn.Module, track_level: str) -> dict[str, float]:
+    """
+    Compute gradient statistics for tracking optimization dynamics.
+
+    Args:
+        model: PyTorch model with computed gradients
+        track_level: "none" (disabled), "basic" (global norm), or "detailed" (per-component)
+
+    Returns:
+        Dictionary of gradient statistics for logging
+    """
+    if track_level == "none":
+        return {}
+
+    grad_stats = {}
+
+    # Basic: global gradient norm (L2 norm of all gradients)
+    if track_level in ["basic", "detailed"]:
+        global_grad_norm_sq = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                global_grad_norm_sq += p.grad.data.norm(2).item() ** 2
+        grad_stats["grad_norm"] = global_grad_norm_sq**0.5
+
+    # Detailed: per-component and per-optimizer-type breakdown
+    if track_level == "detailed":
+        # Group by architecture component (prelude/recur_block/coda)
+        prelude_grad_norm_sq = 0.0
+        recur_grad_norm_sq = 0.0
+        coda_grad_norm_sq = 0.0
+        other_grad_norm_sq = 0.0
+
+        # Group by optimizer type (muon vs adam)
+        muon_grad_norm_sq = 0.0
+        adam_grad_norm_sq = 0.0
+
+        for name, p in model.named_parameters():
+            if p.grad is not None:
+                grad_norm_sq = p.grad.data.norm(2).item() ** 2
+
+                # Classify by architecture component
+                if "prelude" in name:
+                    prelude_grad_norm_sq += grad_norm_sq
+                elif "recur_block" in name or "loop" in name:
+                    recur_grad_norm_sq += grad_norm_sq
+                elif "coda" in name:
+                    coda_grad_norm_sq += grad_norm_sq
+                else:
+                    other_grad_norm_sq += grad_norm_sq
+
+                # Classify by optimizer type
+                # Muon: matrix parameters (weights with ndim >= 2)
+                # Adam: embeddings and other parameters (biases, norms, etc.)
+                if "embed" in name.lower():
+                    adam_grad_norm_sq += grad_norm_sq
+                elif "weight" in name and p.ndim >= 2:
+                    muon_grad_norm_sq += grad_norm_sq
+                else:
+                    adam_grad_norm_sq += grad_norm_sq
+
+        grad_stats["grad_norm/prelude"] = prelude_grad_norm_sq**0.5
+        grad_stats["grad_norm/recur_block"] = recur_grad_norm_sq**0.5
+        grad_stats["grad_norm/coda"] = coda_grad_norm_sq**0.5
+        grad_stats["grad_norm/other"] = other_grad_norm_sq**0.5
+        grad_stats["grad_norm/muon_params"] = muon_grad_norm_sq**0.5
+        grad_stats["grad_norm/adam_params"] = adam_grad_norm_sq**0.5
+
+    return grad_stats

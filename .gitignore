@@ -13,3 +13,6 @@ eval_bundle/
 wandb/
 logs/
 knowledge/
+
+# Machine-specific config
+slurm/machine_config.sh
