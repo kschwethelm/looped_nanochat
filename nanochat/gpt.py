@@ -55,6 +55,7 @@ class GPTConfig:
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
     bptt_k: int = 4  # truncate backprop to last k recurrences
+    sample_initial_state: bool = False  # sample initial recurrent state from N(0, 1/sqrt(d)) instead of using prelude output
 
 
 def norm(x, eps: float = 1e-6):
@@ -459,6 +460,32 @@ class GPT(nn.Module):
             'total': total,
         }
 
+    def _get_initial_state(self, e, warm_start_state, T):
+        """
+        Get the initial recurrent state.
+
+        Args:
+            e: Prelude output (B, T, n_embd)
+            warm_start_state: Optional warm-start state from previous token (B, 1, n_embd) or (B, T, n_embd)
+            T: Sequence length
+
+        Returns:
+            Initial state s (B, T, n_embd)
+        """
+        if warm_start_state is not None:
+            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
+            if warm_start_state.size(1) != T:
+                return warm_start_state.expand(-1, T, -1)
+            else:
+                return warm_start_state
+        else:
+            if self.config.sample_initial_state:
+                # Sample initial state from N(0, 1/sqrt(d)) per Geiping et al. Section 3.3
+                noise_std = self.config.n_embd ** -0.5
+                return torch.randn_like(e) * noise_std
+            else:
+                return e
+
     def setup_optimizer(
         self,
         unembedding_lr=0.004,
@@ -565,15 +592,7 @@ class GPT(nn.Module):
         e = x  # prelude output, used for injection into each recurrence
 
         # 3. Initialize recurrent state
-        # If warm_start_state provided, use it; otherwise start from e
-        if warm_start_state is not None:
-            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
-            if warm_start_state.size(1) != T:
-                s = warm_start_state.expand(-1, T, -1)
-            else:
-                s = warm_start_state
-        else:
-            s = e
+        s = self._get_initial_state(e, warm_start_state, T)
 
         # 4. Recurrent block (run num_recur times)
         for i in range(num_recur):
