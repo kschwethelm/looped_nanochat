@@ -13,7 +13,10 @@ Notable features:
 
 Looped Transformer specifics:
 - Three-stage architecture: prelude (n_prelude layers) → recur (n_recur_block layers, run num_recur times) → coda (n_coda layers)
-- Input injection at each recurrence: u = inject(concat(e, s)) where e=prelude output, s=recurrent state
+- Input injection modes (input_injection config):
+  - "inject_init_prelude": u = inject(concat(e, s)) with s initially from prelude output (default looped behavior)
+  - "inject_init_random": u = inject(concat(e, s)) with s initially sampled from N(0, 1/sqrt(d))
+  - "passthrough": u = s (pure recurrence, no inject layer), s initially from prelude output
   - inject layer initialized as identity-like [I|0] so inject(concat(e,s)) ≈ e initially
 - Warm-start inference: final recurrent state s from token t-1 initializes state for token t (disabled for training)
 - Truncated BPTT: gradients detached for all but last bptt_k recurrences to limit memory/compute
@@ -21,6 +24,7 @@ Looped Transformer specifics:
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -55,7 +59,16 @@ class GPTConfig:
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
     bptt_k: int = 4  # truncate backprop to last k recurrences
-    sample_initial_state: bool = False  # sample initial recurrent state from N(0, 1/sqrt(d)) instead of using prelude output
+    # Input injection mode: controls how recurrent state is initialized and injected
+    # - "inject_init_prelude": inject(concat(e, s)) with s initially from prelude output (default looped behavior)
+    # - "inject_init_random": inject(concat(e, s)) with s initially sampled from N(0, 1/sqrt(d))
+    # - "passthrough": no injection, s passes through directly (pure recurrence, s initially from prelude)
+    input_injection: Literal["inject_init_prelude", "inject_init_random", "passthrough"] = "inject_init_prelude"
+
+    def __post_init__(self):
+        valid_modes = {"inject_init_prelude", "inject_init_random", "passthrough"}
+        if self.input_injection not in valid_modes:
+            raise ValueError(f"input_injection must be one of {valid_modes}, got {self.input_injection}")
 
 
 def norm(x, eps: float = 1e-6):
@@ -196,8 +209,9 @@ class GPT(nn.Module):
                 "coda": nn.ModuleList([Block(config) for _ in range(config.n_coda)]),
             }
         )
-        # Input injection adapter
-        self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
+        # Input injection adapter (only needed when not using passthrough mode)
+        if config.input_injection != "passthrough":
+            self.inject = nn.Linear(2 * config.n_embd, config.n_embd, bias=False)
         # RMSNorm layers outside blocks
         self.norm_emb = RMSNorm(config.n_embd)  # after embedding
         self.norm_recur = RMSNorm(config.n_embd)  # at end of recurrent block (nc)
@@ -247,10 +261,12 @@ class GPT(nn.Module):
         # Initialize inject layer as identity-like: output = e (first half of concat(e, s))
         # This ensures gradients flow on the first forward pass
         # Weight shape is (n_embd, 2*n_embd), we want [I | 0] so inject(concat(e,s)) ≈ e
-        n_embd = self.config.n_embd
-        with torch.no_grad():
-            self.inject.weight.zero_()
-            self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
+        # Only initialize if inject layer exists (not in passthrough mode)
+        if self.config.input_injection != "passthrough":
+            n_embd = self.config.n_embd
+            with torch.no_grad():
+                self.inject.weight.zero_()
+                self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
 
         # RMSNorm weights: initialize to ones
         for module in self.modules():
@@ -386,7 +402,7 @@ class GPT(nn.Module):
         prelude_params = sum(p.numel() for p in self.transformer.prelude.parameters())
         recur_params = sum(p.numel() for p in self.transformer.recur.parameters())
         coda_params = sum(p.numel() for p in self.transformer.coda.parameters())
-        inject_params = sum(p.numel() for p in self.inject.parameters())
+        inject_params = sum(p.numel() for p in self.inject.parameters()) if self.config.input_injection != "passthrough" else 0
         lm_head_params = sum(p.numel() for p in self.lm_head.parameters())
 
         # 2. Matmul FLOPs weighted by usage
@@ -394,7 +410,7 @@ class GPT(nn.Module):
             prelude_params  # prelude runs 1x
             + recur_params * num_recur  # recur runs num_recur times
             + coda_params  # coda runs 1x
-            + inject_params * num_recur  # inject runs num_recur times
+            + inject_params * num_recur  # inject runs num_recur times (0 if passthrough)
             + lm_head_params  # lm_head runs 1x
         )
 
@@ -434,12 +450,13 @@ class GPT(nn.Module):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = 0  # Not used in looped architecture
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
-        # Transformer matrices: prelude + recur + coda + inject
+        # Transformer matrices: prelude + recur + coda + inject (if not passthrough)
+        inject_params = sum(p.numel() for p in self.inject.parameters()) if self.config.input_injection != "passthrough" else 0
         transformer_matrices = (
             sum(p.numel() for p in self.transformer.prelude.parameters())
             + sum(p.numel() for p in self.transformer.recur.parameters())
             + sum(p.numel() for p in self.transformer.coda.parameters())
-            + sum(p.numel() for p in self.inject.parameters())
+            + inject_params
         )
         # Scalars: RMSNorm scale parameters
         scalars = (
@@ -460,31 +477,47 @@ class GPT(nn.Module):
             'total': total,
         }
 
-    def _get_initial_state(self, e, warm_start_state, T):
+    def _state_transfer(self, e, s=None, warm_start_state=None):
         """
-        Get the initial recurrent state.
+        Handle state initialization and input injection based on input_injection mode.
+
+        Combines state initialization and input injection into a single operation:
+        - For "inject_init_prelude" and "inject_init_random": returns inject(concat(e, s))
+        - For "passthrough": returns s directly (no injection layer)
 
         Args:
             e: Prelude output (B, T, n_embd)
+            s: Current recurrent state (B, T, n_embd), or None for initial recurrence
             warm_start_state: Optional warm-start state from previous token (B, 1, n_embd) or (B, T, n_embd)
-            T: Sequence length
 
         Returns:
-            Initial state s (B, T, n_embd)
+            Input to the recurrent block u (B, T, n_embd)
         """
-        if warm_start_state is not None:
-            # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
-            if warm_start_state.size(1) != T:
-                return warm_start_state.expand(-1, T, -1)
-            else:
-                return warm_start_state
-        else:
-            if self.config.sample_initial_state:
+        T = e.size(1)
+
+        # Initialize state on first recurrence (when s is None)
+        if s is None:
+            if warm_start_state is not None:
+                # warm_start_state may be (B, 1, h) from last token - broadcast to match e's shape (B, T, h)
+                if warm_start_state.size(1) != T:
+                    s = warm_start_state.expand(-1, T, -1)
+                else:
+                    s = warm_start_state
+            elif self.config.input_injection == "inject_init_random":
                 # Sample initial state from N(0, 1/sqrt(d)) per Geiping et al. Section 3.3
                 noise_std = self.config.n_embd ** -0.5
-                return torch.randn_like(e) * noise_std
+                s = torch.randn_like(e) * noise_std
             else:
-                return e
+                # Both "inject_init_prelude" and "passthrough" start with prelude output
+                s = e
+
+        # Apply injection or passthrough based on mode
+        if self.config.input_injection == "passthrough":
+            # Pure recurrence: just pass state through directly
+            return s
+        else:
+            # "inject_init_prelude" or "inject_init_random": use injection layer
+            return self.inject(torch.cat([e, s], dim=-1))
 
     def setup_optimizer(
         self,
@@ -508,14 +541,15 @@ class GPT(nn.Module):
             norm_params += list(block.n3.parameters()) + list(block.n4.parameters())
         norm_param_set = set(norm_params)
 
-        # Matrix params: all block params except norms
+        # Matrix params: all block params except norms (include inject only if not passthrough)
+        inject_params_list = list(self.inject.parameters()) if self.config.input_injection != "passthrough" else []
         matrix_params = [
             p
             for p in (
                 list(self.transformer.prelude.parameters())
                 + list(self.transformer.recur.parameters())
                 + list(self.transformer.coda.parameters())
-                + list(self.inject.parameters())
+                + inject_params_list
             )
             if p not in norm_param_set
         ]
@@ -591,13 +625,13 @@ class GPT(nn.Module):
             x = block(x, cos_sin, self.window_sizes[i], kv_cache, layer_idx)
         e = x  # prelude output, used for injection into each recurrence
 
-        # 3. Initialize recurrent state
-        s = self._get_initial_state(e, warm_start_state, T)
+        # 3. Initialize state variable
+        s = None
 
         # 4. Recurrent block (run num_recur times)
         for i in range(num_recur):
-            # Input injection: u = inject(concat(e, s))
-            u = self.inject(torch.cat([e, s], dim=-1))
+            # State transfer: handles initialization (on i==0) and input injection
+            u = self._state_transfer(e, s=s, warm_start_state=warm_start_state)
             # Run recur blocks with KV cache
             for j, block in enumerate(self.transformer.recur):
                 layer_idx = self._get_kv_layer_idx("recur", j, kv_budget, recur_iter=i)

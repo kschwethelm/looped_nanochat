@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=looped_nanochat_scaling_laws
+#SBATCH --job-name=nanochat_scaling_laws
 #SBATCH --output=logs/scaling_laws/%A.out
 #SBATCH --error=logs/scaling_laws/%A.err
 #SBATCH --time=10:00:00
@@ -12,7 +12,7 @@
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=k.schwethelm@tum.de
 
-LABEL="feb1"
+LABEL="feb4"
 
 FLOPS_BUDGETS=(
     1e18
@@ -21,23 +21,24 @@ FLOPS_BUDGETS=(
     1e19
 )
 # Discrete model configs - fixed architecture, varying size (width = size * 64)
-# Fixed architecture: 2 prelude + 4×4 recur + 2 coda = 20 effective layers
+
+# Non-looped fixed architecture: 2 prelude + 16 recur (no recursions) + 2 coda = 20 effective layers
 SIZES=(            8  10  12  14  16  18  20)
 DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32)  # scaled ~inversely with params
 N_PRELUDE=2
-N_RECUR_BLOCK=4
+N_RECUR_BLOCK=16
 N_CODA=2
-N_RECUR=4
+N_RECUR=1
 
 NPROC_PER_NODE=1 # Number of processes/GPUs to use
-WANDB_RUN="${WANDB_RUN:-scaling_${LABEL}}"
+WANDB_RUN="${WANDB_RUN:-no-loop_scaling_${LABEL}}"
 EVAL_TOKENS=$((100 * 524288))  # ~100M tokens for final eval (default is ~10M)
 
 export OMP_NUM_THREADS=1 # disable CPU multi-threading for libraries that use OpenMP (NumPy, PyTorch CPU ops, etc.)
 
 # Set cache directories (datasets as subdirectory of HF_HOME)
 BASE_DIR="/dss/dssmcmlfs01/pn73mu/pn73mu-dss-0000"
-export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/nanochat"
+export NANOCHAT_BASE_DIR="$BASE_DIR/kristian/.cache/no-loop-nanochat"
 export HF_HOME="$BASE_DIR/LLMs/.cache/huggingface"
 export HF_DATASETS_CACHE="$BASE_DIR/LLMs/.cache/huggingface/datasets"
 
@@ -107,12 +108,12 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
             --core-metric-max-per-task=-1 \
             --sample-every=-1 \
             --save-every=-1 \
-            --window-pattern="LLSSSLLL" \
+            --window-pattern="LLSSSLSSSLSSSLSSSLLL" \
             --train-recur-mean=$N_RECUR \
             --n-prelude=$N_PRELUDE \
             --n-recur-block=$N_RECUR_BLOCK \
             --n-coda=$N_CODA \
-            --input-injection=inject_init_prelude \
+            --input-injection=passthrough \
             --no-sample-recur \
             2>&1 | tee "$RESULTS_DIR/${TAG}_train.log"
 

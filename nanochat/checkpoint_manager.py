@@ -31,6 +31,11 @@ def _patch_missing_config_keys(model_config_kwargs):
         model_config_kwargs["window_pattern"] = "L"
         log0("Patching missing window_pattern in model config to 'L'")
 
+    # Old models used inject_init_prelude mode
+    if "input_injection" not in model_config_kwargs:
+        model_config_kwargs["input_injection"] = "inject_init_prelude"
+        log0("Patching missing input_injection in model config to 'inject_init_prelude'")
+
     # Remove deprecated config keys
     deprecated_keys = ["kv_cache_recur_budget", "inject_mode", "recur_warm_start"]
     for key in deprecated_keys:

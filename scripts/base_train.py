@@ -75,6 +75,13 @@ parser.add_argument("--n-coda", type=int, default=2, help="number of coda layers
 parser.add_argument("--train-recur-mean", type=float, default=4.0, help="mean recurrences during training (also default r at inference)")
 parser.add_argument("--train-recur-max", type=int, default=16, help="max recurrences sampled during training")
 parser.add_argument("--bptt-k", type=int, default=4, help="truncate backprop to last k recurrences (limits gradient depth)")
+parser.add_argument(
+    "--input-injection",
+    type=str,
+    default="inject_init_prelude",
+    choices=["inject_init_prelude", "inject_init_random", "passthrough"],
+    help="input injection mode: inject_init_prelude (default), inject_init_random, or passthrough (no injection)",
+)
 parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use fixed train_recur_mean instead")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
@@ -210,6 +217,7 @@ model_config_kwargs = {
     "train_recur_mean": args.train_recur_mean,
     "train_recur_max": args.train_recur_max,
     "bptt_k": args.bptt_k,
+    "input_injection": args.input_injection,
 }
 with torch.device("meta"):
     # All tensors are created as meta tensors (they have shape/dtype but no data)
