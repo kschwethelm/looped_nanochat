@@ -12,7 +12,7 @@ FLOPS_BUDGETS=(
 
 # Non-looped fixed architecture: 2 prelude + 16 recur (no recursions) + 2 coda = 20 effective layers
 SIZES=(            8  10  12  14  16  18  20)
-DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32)  # scaled ~inversely with params
+DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32)
 N_PRELUDE=2
 N_RECUR_BLOCK=16
 N_CODA=2
@@ -30,7 +30,7 @@ source slurm/machine_config.sh
 validate_config || exit 1
 
 # Override NANOCHAT_BASE_DIR for non-looped experiments
-export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR%/*}/no-loop-nanochat"
+export NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR%/*}/nanochat"
 uv sync
 source .venv/bin/activate
 
@@ -112,12 +112,12 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         LOG_FILE="$RESULTS_DIR/${TAG}_train.log"
 
         # Extract detailed parameter counts (for scaling law analysis with different conventions)
-        PARAMS_WTE=$(grep "wte:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_VE=$(grep "value_embeds:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_LM=$(grep "lm_head:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_TRANSFORMER=$(grep "transformer_matrices:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_SCALARS=$(grep "scalars:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_TOTAL=$(grep "total:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_WTE=$(grep "wte\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_VE=$(grep "value_embeds\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_LM=$(grep "lm_head\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_TRANSFORMER=$(grep "transformer_matrices\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_SCALARS=$(grep "scalars\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_TOTAL=$(grep "total\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
 
         NUM_ITERS=$(grep "Calculated number of iterations" "$LOG_FILE" | tail -1 | sed 's/.*: //' | tr -d ',')
         # Calculate tokens trained (iterations * batch_size, default 524288)
