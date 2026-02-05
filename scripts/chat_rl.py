@@ -388,8 +388,8 @@ for step in range(num_steps):
         }
     )
 
-    # Compute gradient statistics (after all backward passes complete)
-    grad_stats = compute_gradient_stats(model, args.track_gradients)
+    # Compute model health statistics: gradients and parameters (after all backward passes complete)
+    model_health_stats = compute_gradient_stats(model, args.track_gradients)
 
     # Update the model parameters
     lrm = get_lr_multiplier(step)
@@ -401,7 +401,7 @@ for step in range(num_steps):
         {
             "step": step,
             "lrm": lrm,
-            **{f"train/{k}": v for k, v in grad_stats.items()},  # Add gradient stats
+            **{f"model_health/{k}": v for k, v in model_health_stats.items()},  # Add model health stats
         }
     )
 

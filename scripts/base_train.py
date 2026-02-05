@@ -489,8 +489,8 @@ while True:
         loss.backward()
         x, y, dataloader_state_dict = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
 
-    # Compute gradient statistics (after all backward passes complete)
-    grad_stats = compute_gradient_stats(orig_model, args.track_gradients)
+    # Compute model health statistics: gradients and parameters (after all backward passes complete)
+    model_health_stats = compute_gradient_stats(orig_model, args.track_gradients)
 
     # step the optimizer
     lrm = get_lr_multiplier(step)
@@ -503,6 +503,12 @@ while True:
             group["weight_decay"] = muon_weight_decay
     optimizer.step()
     model.zero_grad(set_to_none=True)
+
+    # Extract effective learning rates from optimizer groups (for logging)
+    # Groups order: [lm_head (unembed), embedding, norms, muon_shape1, muon_shape2, ...]
+    effective_lr_unembed = optimizer.param_groups[0]["lr"]  # lm_head (AdamW)
+    effective_lr_embed = optimizer.param_groups[1]["lr"]    # embedding (AdamW)
+    effective_lr_muon = optimizer.param_groups[3]["lr"]     # first Muon group (all Muon groups have same lr)
     train_loss_f = train_loss.item()  # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
@@ -540,13 +546,18 @@ while True:
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
+            "train/loss_raw": train_loss_f,  # raw unsmoothed loss from last microbatch
             "train/lrm": lrm,
             "train/dt": dt,
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
             "train/epoch": epoch,
             "train/num_recur": logged_num_recur,
-            **{f"train/{k}": v for k, v in grad_stats.items()},  # Add gradient stats
+            "lr/muon": effective_lr_muon,           # effective learning rate for Muon (matrix params)
+            "lr/embed": effective_lr_embed,         # effective learning rate for embeddings
+            "lr/unembed": effective_lr_unembed,     # effective learning rate for unembedding (lm_head)
+            "muon/weight_decay": muon_weight_decay, # Muon weight decay schedule value
+            **{f"model_health/{k}": v for k, v in model_health_stats.items()},  # Add model health stats
         }
         wandb_run.log(log_data)
 

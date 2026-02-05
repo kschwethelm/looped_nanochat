@@ -314,69 +314,156 @@ def get_peak_flops(device_name: str) -> float:
 
 def compute_gradient_stats(model: torch.nn.Module, track_level: str) -> dict[str, float]:
     """
-    Compute gradient statistics for tracking optimization dynamics.
+    Compute gradient and parameter statistics for tracking optimization dynamics and model health.
 
     Args:
         model: PyTorch model with computed gradients
         track_level: "none" (disabled), "basic" (global norm), or "detailed" (per-component)
 
     Returns:
-        Dictionary of gradient statistics for logging
+        Dictionary of gradient and parameter statistics for logging
     """
     if track_level == "none":
         return {}
 
-    grad_stats = {}
+    stats = {}
 
-    # Basic: global gradient norm (L2 norm of all gradients)
+    # Basic: global gradient and parameter norms (L1 and L2)
     if track_level in ["basic", "detailed"]:
+        global_grad_l1 = 0.0
         global_grad_norm_sq = 0.0
+        global_param_l1 = 0.0
+        global_param_norm_sq = 0.0
+
         for p in model.parameters():
+            # Parameter norms
+            global_param_l1 += p.data.abs().sum().item()
+            global_param_norm_sq += p.data.pow(2).sum().item()
+
+            # Gradient norms (if available)
             if p.grad is not None:
+                global_grad_l1 += p.grad.data.abs().sum().item()
                 global_grad_norm_sq += p.grad.data.norm(2).item() ** 2
-        grad_stats["grad_norm"] = global_grad_norm_sq**0.5
+
+        stats["grad_norm/l2"] = global_grad_norm_sq**0.5
+        stats["grad_norm/l1"] = global_grad_l1
+        stats["param_norm/l2"] = global_param_norm_sq**0.5
+        stats["param_norm/l1"] = global_param_l1
 
     # Detailed: per-component and per-optimizer-type breakdown
     if track_level == "detailed":
         # Group by architecture component (prelude/recur_block/coda)
+        prelude_grad_l1 = 0.0
         prelude_grad_norm_sq = 0.0
+        prelude_param_l1 = 0.0
+        prelude_param_norm_sq = 0.0
+
+        recur_grad_l1 = 0.0
         recur_grad_norm_sq = 0.0
+        recur_param_l1 = 0.0
+        recur_param_norm_sq = 0.0
+
+        coda_grad_l1 = 0.0
         coda_grad_norm_sq = 0.0
+        coda_param_l1 = 0.0
+        coda_param_norm_sq = 0.0
+
+        other_grad_l1 = 0.0
         other_grad_norm_sq = 0.0
+        other_param_l1 = 0.0
+        other_param_norm_sq = 0.0
 
         # Group by optimizer type (muon vs adam)
+        muon_grad_l1 = 0.0
         muon_grad_norm_sq = 0.0
+        muon_param_l1 = 0.0
+        muon_param_norm_sq = 0.0
+
+        adam_grad_l1 = 0.0
         adam_grad_norm_sq = 0.0
+        adam_param_l1 = 0.0
+        adam_param_norm_sq = 0.0
 
         for name, p in model.named_parameters():
+            # Parameter stats
+            param_l1 = p.data.abs().sum().item()
+            param_norm_sq = p.data.pow(2).sum().item()
+
+            # Gradient stats (if available)
             if p.grad is not None:
+                grad_l1 = p.grad.data.abs().sum().item()
                 grad_norm_sq = p.grad.data.norm(2).item() ** 2
+            else:
+                grad_l1 = 0.0
+                grad_norm_sq = 0.0
 
-                # Classify by architecture component
-                if "prelude" in name:
-                    prelude_grad_norm_sq += grad_norm_sq
-                elif "recur_block" in name or "loop" in name:
-                    recur_grad_norm_sq += grad_norm_sq
-                elif "coda" in name:
-                    coda_grad_norm_sq += grad_norm_sq
-                else:
-                    other_grad_norm_sq += grad_norm_sq
+            # Classify by architecture component
+            if "prelude" in name:
+                prelude_grad_l1 += grad_l1
+                prelude_grad_norm_sq += grad_norm_sq
+                prelude_param_l1 += param_l1
+                prelude_param_norm_sq += param_norm_sq
+            elif "recur_block" in name or "loop" in name:
+                recur_grad_l1 += grad_l1
+                recur_grad_norm_sq += grad_norm_sq
+                recur_param_l1 += param_l1
+                recur_param_norm_sq += param_norm_sq
+            elif "coda" in name:
+                coda_grad_l1 += grad_l1
+                coda_grad_norm_sq += grad_norm_sq
+                coda_param_l1 += param_l1
+                coda_param_norm_sq += param_norm_sq
+            else:
+                other_grad_l1 += grad_l1
+                other_grad_norm_sq += grad_norm_sq
+                other_param_l1 += param_l1
+                other_param_norm_sq += param_norm_sq
 
-                # Classify by optimizer type
-                # Muon: matrix parameters (weights with ndim >= 2)
-                # Adam: embeddings and other parameters (biases, norms, etc.)
-                if "embed" in name.lower():
-                    adam_grad_norm_sq += grad_norm_sq
-                elif "weight" in name and p.ndim >= 2:
-                    muon_grad_norm_sq += grad_norm_sq
-                else:
-                    adam_grad_norm_sq += grad_norm_sq
+            # Classify by optimizer type
+            # Muon: matrix parameters (weights with ndim >= 2)
+            # Adam: embeddings and other parameters (biases, norms, etc.)
+            if "embed" in name.lower():
+                adam_grad_l1 += grad_l1
+                adam_grad_norm_sq += grad_norm_sq
+                adam_param_l1 += param_l1
+                adam_param_norm_sq += param_norm_sq
+            elif "weight" in name and p.ndim >= 2:
+                muon_grad_l1 += grad_l1
+                muon_grad_norm_sq += grad_norm_sq
+                muon_param_l1 += param_l1
+                muon_param_norm_sq += param_norm_sq
+            else:
+                adam_grad_l1 += grad_l1
+                adam_grad_norm_sq += grad_norm_sq
+                adam_param_l1 += param_l1
+                adam_param_norm_sq += param_norm_sq
 
-        grad_stats["grad_norm/prelude"] = prelude_grad_norm_sq**0.5
-        grad_stats["grad_norm/recur_block"] = recur_grad_norm_sq**0.5
-        grad_stats["grad_norm/coda"] = coda_grad_norm_sq**0.5
-        grad_stats["grad_norm/other"] = other_grad_norm_sq**0.5
-        grad_stats["grad_norm/muon_params"] = muon_grad_norm_sq**0.5
-        grad_stats["grad_norm/adam_params"] = adam_grad_norm_sq**0.5
+        # Gradient stats
+        stats["grad_norm/prelude/l2"] = prelude_grad_norm_sq**0.5
+        stats["grad_norm/prelude/l1"] = prelude_grad_l1
+        stats["grad_norm/recur_block/l2"] = recur_grad_norm_sq**0.5
+        stats["grad_norm/recur_block/l1"] = recur_grad_l1
+        stats["grad_norm/coda/l2"] = coda_grad_norm_sq**0.5
+        stats["grad_norm/coda/l1"] = coda_grad_l1
+        stats["grad_norm/other/l2"] = other_grad_norm_sq**0.5
+        stats["grad_norm/other/l1"] = other_grad_l1
+        stats["grad_norm/muon_params/l2"] = muon_grad_norm_sq**0.5
+        stats["grad_norm/muon_params/l1"] = muon_grad_l1
+        stats["grad_norm/adam_params/l2"] = adam_grad_norm_sq**0.5
+        stats["grad_norm/adam_params/l1"] = adam_grad_l1
 
-    return grad_stats
+        # Parameter stats
+        stats["param_norm/prelude/l2"] = prelude_param_norm_sq**0.5
+        stats["param_norm/prelude/l1"] = prelude_param_l1
+        stats["param_norm/recur_block/l2"] = recur_param_norm_sq**0.5
+        stats["param_norm/recur_block/l1"] = recur_param_l1
+        stats["param_norm/coda/l2"] = coda_param_norm_sq**0.5
+        stats["param_norm/coda/l1"] = coda_param_l1
+        stats["param_norm/other/l2"] = other_param_norm_sq**0.5
+        stats["param_norm/other/l1"] = other_param_l1
+        stats["param_norm/muon_params/l2"] = muon_param_norm_sq**0.5
+        stats["param_norm/muon_params/l1"] = muon_param_l1
+        stats["param_norm/adam_params/l2"] = adam_param_norm_sq**0.5
+        stats["param_norm/adam_params/l1"] = adam_param_l1
+
+    return stats
