@@ -53,3 +53,40 @@ The clean solution: fix the architecture at (2 prelude, 4 recur, 2 coda, r=4), g
 | 16   | 1024  | 8     | 20          | 237,014,016 | 2.315747e+09 |
 | 18   | 1152  | 9     | 20          | 281,091,456 | 2.824630e+09 |
 | 20   | 1280  | 10    | 20          | 328,380,160 | 3.382272e+09 |
+
+### Results
+
+Given we did not make any training parameter changes, the scaling law results are surprisingly clean:
+
+![scaling laws](scaling_laws_feb1.png)
+
+**Initial observation:** Optimal configurations showed tokens/params ratio rising with scale (8.9 -> 11.4), initially suggesting parameter starvation. However, this didn't account for the recurrent block's parameter reuse.
+
+| FLOPs | Eff Params | Tokens | Ratio | Val BPB |
+|-------|------------|--------|-------|---------|
+| 1e+18 | 116,180,734 | 1,009,724,988 | 8.9 | 0.9580 |
+| 2e+18 | 159,155,139 | 1,482,003,055 | 9.3 | 0.9147 |
+| 5e+18 | 214,639,515 | 2,263,974,151 | 10.7 | 0.8784 |
+| 1e+19 | 295,598,854 | 3,351,493,312 | 11.4 | 0.8448 | 
+
+**Accounting for parameter reuse:** Since the recurrent block's 4 layers execute 4× per forward pass while prelude/coda layers run once, the effective parameter count must weight by usage:
+
+```
+effective_params = 2.5 × params_transformer
+```
+
+(2 prelude layers × 1 use) + (2 coda layers × 1 use) + (4 recur layers × 4 uses) = 20 layer-uses / 8 total layers = 2.5× multiplier
+
+**Corrected optimal configurations:**
+
+| FLOPs | Eff Params | Tokens | Ratio | Val BPB |
+|-------|------------|--------|-------|---------|
+| 1e+18 | 171,176,667 | 1,006,769,967 | 6.1 | 0.9580 |
+| 2e+18 | 245,888,809 | 1,484,904,920 | 6.0 | 0.9147 |
+| 5e+18 | 348,014,355 | 2,268,826,257 | 6.6 | 0.8784 |
+| 1e+19 | 506,477,134 | 3,339,016,342 | 6.7 | 0.8448 |
+
+
+**Key finding:** When accounting for parameter reuse, the tokens/effective-params ratio stabilizes at ~6-7 across all scales (compared to Chinchilla's ~20 for standard transformers). This indicates the looped architecture efficiently utilizes parameters through recurrence.
+
+

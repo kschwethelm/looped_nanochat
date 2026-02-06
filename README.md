@@ -1,7 +1,7 @@
 # looped nanochat
 
 ![nanochat logo](dev/nanochat.png)
-![scaling laws](dev/scaling_laws_jan26.png)
+![scaling laws](dev/scaling_laws_feb1.png)
 
 This project develops a **looped (depth-recurrent) transformer architecture** that scales test-time compute by iterating a recurrent block in latent space, rather than producing more tokens (like Chain-of-Thought). This allows the model to "think" in continuous high-dimensional space before emitting each token.
 
