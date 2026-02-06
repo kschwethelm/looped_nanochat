@@ -445,19 +445,22 @@ class GPT(nn.Module):
 
         Returns a dict with counts for each parameter group, so downstream analysis
         can experiment with which combination gives the cleanest scaling laws.
+
+        Key distinction for looped architecture:
+        - recur_block: parameters executed num_recur times (reused)
+        - prelude/coda/inject: parameters executed once per forward pass
         """
         # Count each group separately
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = 0  # Not used in looped architecture
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
-        # Transformer matrices: prelude + recur + coda + inject (if not passthrough)
-        inject_params = sum(p.numel() for p in self.inject.parameters()) if self.config.input_injection != "passthrough" else 0
-        transformer_matrices = (
-            sum(p.numel() for p in self.transformer.prelude.parameters())
-            + sum(p.numel() for p in self.transformer.recur.parameters())
-            + sum(p.numel() for p in self.transformer.coda.parameters())
-            + inject_params
-        )
+
+        # Split transformer matrices by execution pattern
+        prelude = sum(p.numel() for p in self.transformer.prelude.parameters())
+        recur_block = sum(p.numel() for p in self.transformer.recur.parameters())
+        coda = sum(p.numel() for p in self.transformer.coda.parameters())
+        inject = sum(p.numel() for p in self.inject.parameters()) if self.config.input_injection != "passthrough" else 0
+
         # Scalars: RMSNorm scale parameters
         scalars = (
             sum(p.numel() for p in self.norm_emb.parameters())
@@ -465,17 +468,47 @@ class GPT(nn.Module):
             + sum(p.numel() for p in self.norm_final.parameters())
         )
 
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        total = wte + value_embeds + lm_head + prelude + recur_block + coda + inject + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
 
         return {
             'wte': wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
-            'transformer_matrices': transformer_matrices,
+            'prelude': prelude,
+            'recur_block': recur_block,
+            'coda': coda,
+            'inject': inject,
             'scalars': scalars,
             'total': total,
         }
+
+    def effective_params(self, num_recur=None):
+        """
+        Compute effective parameter count accounting for parameter reuse in recurrent block.
+
+        The recurrent block's parameters are executed num_recur times, while prelude/coda
+        run once. This gives a measure of "parameter uses" rather than unique parameters.
+
+        Args:
+            num_recur: Number of recurrences to assume. If None, uses train_recur_mean.
+
+        Returns:
+            Effective parameter count (weighted by usage)
+        """
+        if num_recur is None:
+            num_recur = int(self.config.train_recur_mean)
+
+        counts = self.num_scaling_params()
+
+        # Parameters that run once per forward pass
+        once = counts['wte'] + counts['lm_head'] + counts['prelude'] + counts['coda'] + counts['scalars']
+
+        # Parameters that run num_recur times per forward pass
+        reused = counts['recur_block'] + counts['inject']
+
+        effective = once + (reused * num_recur)
+        return effective
 
     def _state_transfer(self, e, s=None, warm_start_state=None):
         """

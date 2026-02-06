@@ -47,9 +47,40 @@ def print_model_structure(config: GPTConfig) -> None:
     print("=" * 80)
     print("Parameter Counts")
     print("=" * 80)
-    for key, value in param_counts.items():
-        print(f"  {key:24s}: {value:,}")
-    print(f"Estimated FLOPs:     {model.estimate_flops():e} per token")
+
+    # Group parameters by execution pattern
+    print("Embedding & Output:")
+    print(f"  {'wte':24s}: {param_counts['wte']:>15,}")
+    print(f"  {'lm_head':24s}: {param_counts['lm_head']:>15,}")
+
+    print("\nTransformer Layers (by execution pattern):")
+    print(f"  {'prelude (1× per fwd)':24s}: {param_counts['prelude']:>15,}")
+    print(f"  {'recur_block (r× per fwd)':24s}: {param_counts['recur_block']:>15,}")
+    print(f"  {'coda (1× per fwd)':24s}: {param_counts['coda']:>15,}")
+    print(f"  {'inject (r× per fwd)':24s}: {param_counts['inject']:>15,}")
+
+    print("\nOther:")
+    print(f"  {'scalars (norms)':24s}: {param_counts['scalars']:>15,}")
+    print(f"  {'value_embeds':24s}: {param_counts['value_embeds']:>15,}")
+
+    print("\nTotals:")
+    print(f"  {'total':24s}: {param_counts['total']:>15,}")
+
+    # Show effective parameters for different recurrence depths
+    print("\nEffective Parameters (accounting for reuse):")
+    num_recur = int(config.train_recur_mean)
+    eff_params = model.effective_params(num_recur=num_recur)
+    multiplier = eff_params / param_counts['total']
+    print(f"  At r={num_recur} (train mean):   {eff_params:>15,}  ({multiplier:.2f}× total)")
+
+    # Show a few other recurrence depths for reference
+    for r in [1, 8, 16]:
+        if r != num_recur:
+            eff = model.effective_params(num_recur=r)
+            mult = eff / param_counts['total']
+            print(f"  At r={r:2d}:              {eff:>15,}  ({mult:.2f}× total)")
+
+    print(f"\nEstimated FLOPs:     {model.estimate_flops():e} per token (at r={int(config.train_recur_mean)})")
     print()
 
     # Print detailed parameter structure

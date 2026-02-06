@@ -11,7 +11,7 @@ FLOPS_BUDGETS=(
 # Discrete model configs - fixed architecture, varying size (width = size * 64)
 # Fixed architecture: 2 prelude + 4×4 recur + 2 coda = 20 effective layers
 SIZES=(            8  10  12  14  16  18  20)
-DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32)
+DEVICE_BATCH_SIZES=(128  64  64  32  32  32  32) 
 N_PRELUDE=2
 N_RECUR_BLOCK=4
 N_CODA=2
@@ -37,7 +37,7 @@ RESULTS_FILE="$RESULTS_DIR/results.csv"
 
 # Write CSV header only if file doesn't exist
 if [ ! -f "$RESULTS_FILE" ]; then
-    echo "flops_budget,size,model_dim,params_wte,params_value_embeds,params_lm_head,params_transformer,params_scalars,params_total,num_iterations,tokens_trained,val_bpb,core_score,train_time_sec" > "$RESULTS_FILE"
+    echo "flops_budget,size,model_dim,params_wte,params_value_embeds,params_lm_head,params_prelude,params_recur_block,params_coda,params_inject,params_scalars,params_total,params_effective,num_iterations,tokens_trained,val_bpb,core_score,train_time_sec" > "$RESULTS_FILE"
 fi
 
 log() {
@@ -112,9 +112,13 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         PARAMS_WTE=$(grep "wte\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
         PARAMS_VE=$(grep "value_embeds\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
         PARAMS_LM=$(grep "lm_head\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
-        PARAMS_TRANSFORMER=$(grep "transformer_matrices\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_PRELUDE=$(grep "prelude\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_RECUR=$(grep "recur_block\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_CODA=$(grep "coda\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_INJECT=$(grep "inject\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
         PARAMS_SCALARS=$(grep "scalars\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
         PARAMS_TOTAL=$(grep "total\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
+        PARAMS_EFFECTIVE=$(grep "Effective params\s*:" "$LOG_FILE" | tail -1 | grep -oP '[\d,]+' | tr -d ',')
 
         NUM_ITERS=$(grep "Calculated number of iterations" "$LOG_FILE" | tail -1 | sed 's/.*: //' | tr -d ',')
         # Calculate tokens trained (iterations * batch_size, default 524288)
@@ -131,10 +135,10 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
             CORE_SCORE="0.0"
         fi
 
-        log "  Params: $PARAMS_TOTAL (transformer: $PARAMS_TRANSFORMER), Iters: $NUM_ITERS, Val BPB: $VAL_BPB, CORE: $CORE_SCORE"
+        log "  Params: $PARAMS_TOTAL (effective: $PARAMS_EFFECTIVE, recur: $PARAMS_RECUR), Iters: $NUM_ITERS, Val BPB: $VAL_BPB, CORE: $CORE_SCORE"
 
         # Append to CSV
-        echo "$flops,$s,$MODEL_DIM,$PARAMS_WTE,$PARAMS_VE,$PARAMS_LM,$PARAMS_TRANSFORMER,$PARAMS_SCALARS,$PARAMS_TOTAL,$NUM_ITERS,$TOKENS_TRAINED,$VAL_BPB,$CORE_SCORE,$TRAIN_TIME" >> "$RESULTS_FILE"
+        echo "$flops,$s,$MODEL_DIM,$PARAMS_WTE,$PARAMS_VE,$PARAMS_LM,$PARAMS_PRELUDE,$PARAMS_RECUR,$PARAMS_CODA,$PARAMS_INJECT,$PARAMS_SCALARS,$PARAMS_TOTAL,$PARAMS_EFFECTIVE,$NUM_ITERS,$TOKENS_TRAINED,$VAL_BPB,$CORE_SCORE,$TRAIN_TIME" >> "$RESULTS_FILE"
     done
 done
 

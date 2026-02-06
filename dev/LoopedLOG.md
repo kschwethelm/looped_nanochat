@@ -60,33 +60,31 @@ Given we did not make any training parameter changes, the scaling law results ar
 
 ![scaling laws](scaling_laws_feb1.png)
 
-**Initial observation:** Optimal configurations showed tokens/params ratio rising with scale (8.9 -> 11.4), initially suggesting parameter starvation. However, this didn't account for the recurrent block's parameter reuse.
+**Initial observation (physical params):** The optimal tokens/params ratio sits around 9 to 11, already revealing the looped architecture is much more data-efficient than standard transformers (Chinchilla's ~20). However, the ratio rises with scale (8.9 → 11.4), making it harder to use for compute-optimal planning.
 
-| FLOPs | Eff Params | Tokens | Ratio | Val BPB |
-|-------|------------|--------|-------|---------|
+| FLOPs | Params | Tokens | Ratio | Val BPB |
+|-------|--------|--------|-------|---------|
 | 1e+18 | 116,180,734 | 1,009,724,988 | 8.9 | 0.9580 |
 | 2e+18 | 159,155,139 | 1,482,003,055 | 9.3 | 0.9147 |
 | 5e+18 | 214,639,515 | 2,263,974,151 | 10.7 | 0.8784 |
 | 1e+19 | 295,598,854 | 3,351,493,312 | 11.4 | 0.8448 | 
 
-**Accounting for parameter reuse:** Since the recurrent block's 4 layers execute 4× per forward pass while prelude/coda layers run once, the effective parameter count must weight by usage:
-
+**Refitting with usage-weighted params:** Since the recurrent block's 4 layers execute 4× per forward pass while prelude/coda layers run once, we can define an effective parameter count that weights by usage:
 ```
-effective_params = 2.5 × params_transformer
+effective_params = once_params + num_recur × reused_params
 ```
 
-(2 prelude layers × 1 use) + (2 coda layers × 1 use) + (4 recur layers × 4 uses) = 20 layer-uses / 8 total layers = 2.5× multiplier
+(2 prelude layers × 1 use) + (2 coda layers × 1 use) + (4 recur layers × 4 uses) = 20 layer-uses / 8 total layers = 2.5× multiplier on average.
 
-**Corrected optimal configurations:**
+Refitting the scaling law with this definition as the independent variable gives a much more stable optimal ratio:
 
 | FLOPs | Eff Params | Tokens | Ratio | Val BPB |
 |-------|------------|--------|-------|---------|
-| 1e+18 | 171,176,667 | 1,006,769,967 | 6.1 | 0.9580 |
-| 2e+18 | 245,888,809 | 1,484,904,920 | 6.0 | 0.9147 |
-| 5e+18 | 348,014,355 | 2,268,826,257 | 6.6 | 0.8784 |
-| 1e+19 | 506,477,134 | 3,339,016,342 | 6.7 | 0.8448 |
+| 1e+18 | 172,302,833 | 1,006,703,553 | 6.0 | 0.9580 |
+| 2e+18 | 247,645,826 | 1,485,003,445 | 6.0 | 0.9147 |
+| 5e+18 | 350,724,715 | 2,268,943,864 | 6.6 | 0.8784 |
+| 1e+19 | 510,828,415 | 3,338,573,361 | 6.6 | 0.8448 |  
 
+**Key finding:** Defining N as usage-weighted parameters yields a stable optimal tokens/params ratio of ~6–7 across scales, compared to the drifting 8.9–11.4 under physical parameter count. We use this definition for compute-optimal planning going forward. Note that this ratio isn't directly comparable to Chinchilla's ~20, since tied weights aren't equivalent to independent weights—but the physical-params ratio of ~10 vs ~20 already shows a clear data efficiency gain.
 
-**Key finding:** When accounting for parameter reuse, the tokens/effective-params ratio stabilizes at ~6-7 across all scales (compared to Chinchilla's ~20 for standard transformers). This indicates the looped architecture efficiently utilizes parameters through recurrence.
-
-
+**Future work:** It would be interesting to fit curves with larger FLOPs budgets to see if the physical-params ratio converges (maybe to Chinchillas ~20) or continues rising, though this would require significant compute.

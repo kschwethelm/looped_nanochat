@@ -90,8 +90,8 @@ parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate 
 parser.add_argument(
     "--target-param-data-ratio",
     type=int,
-    default=4,
-    help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)",
+    default=7,
+    help="calculate num_iterations to maintain data:param ratio (accounts for parameter reuse + slight overtrain), -1 = disable)",
 )
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size")
@@ -263,7 +263,13 @@ print0("Parameter counts:")
 for key, value in param_counts.items():
     print0(f"  {key:24s}: {value:,}")
 num_params = param_counts['total']
-num_scaling_params = param_counts['total'] # TODO: Determine which parameters give cleanest scaling law
+
+# Effective parameters accounting for recurrent block reuse
+num_effective_params = orig_model.effective_params(num_recur=int(model_config.train_recur_mean))
+print0(f"Effective params: {num_effective_params:,}")
+
+# For scaling law analysis: total params vs effective params
+num_scaling_params = num_effective_params
 num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
@@ -590,10 +596,12 @@ get_report().log(
         user_config,  # CLI args
         {  # stats about the training setup
             "Number of parameters": num_params,
+            "Effective parameters (w/ recur reuse)": num_effective_params,
             "Number of FLOPs per token": f"{num_flops_per_token:e}",
             "Calculated number of iterations": num_iterations,
             "Number of training tokens": total_tokens,
             "Tokens : Params ratio": args.total_batch_size * num_iterations / num_params,
+            "Tokens : Effective Params ratio": args.total_batch_size * num_iterations / num_effective_params,
             "DDP world size": ddp_world_size,
             "warmup_ratio": args.warmup_ratio,
             "warmdown_ratio": args.warmdown_ratio,
