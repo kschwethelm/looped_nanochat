@@ -176,8 +176,6 @@ def plot_chatcore_vs_recur(data: dict, output_path: Path):
             all_recur_vals.update(data[model_tag].keys())
         ax.set_xticks(sorted(all_recur_vals))
 
-    # Set y-axis range (ChatCORE is 0-1)
-    ax.set_ylim(0, 1)
 
     plt.tight_layout()
 

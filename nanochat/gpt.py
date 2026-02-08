@@ -55,7 +55,7 @@ class GPTConfig:
     n_recur_block: int = 4
     n_coda: int = 2
 
-    # Looped Transformer traning options
+    # Looped Transformer training options
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
     train_recur_max: int = 16  # max recurrences sampled during training
     bptt_k: int = 4  # truncate backprop to last k recurrences
@@ -64,6 +64,7 @@ class GPTConfig:
     # - "inject_init_random": inject(concat(e, s)) with s initially sampled from N(0, 1/sqrt(d))
     # - "passthrough": no injection, s passes through directly (pure recurrence, s initially from prelude)
     input_injection: Literal["inject_init_prelude", "inject_init_random", "passthrough"] = "inject_init_prelude"
+    logit_softcap: float = 15.0  # smoothly cap logits to [-softcap, softcap] via tanh
 
     def __post_init__(self):
         valid_modes = {"inject_init_prelude", "inject_init_random", "passthrough"}
@@ -263,7 +264,6 @@ class GPT(nn.Module):
         # Weight shape is (n_embd, 2*n_embd), we want [I | 0] so inject(concat(e,s)) ≈ e
         # Only initialize if inject layer exists (not in passthrough mode)
         if self.config.input_injection != "passthrough":
-            n_embd = self.config.n_embd
             with torch.no_grad():
                 self.inject.weight.zero_()
                 self.inject.weight[:, :n_embd].copy_(torch.eye(n_embd))
@@ -419,7 +419,7 @@ class GPT(nn.Module):
         num_layers = self.config.n_prelude + self.config.n_recur_block + self.config.n_coda
         for layer_idx in range(num_layers):
             window = self.window_sizes[layer_idx][0]
-            effective_seq = t if window < 0 else min(window, t)
+            effective_seq = min(window, t)
 
             # Determine how many times this layer runs
             if layer_idx < self.config.n_prelude:
@@ -687,7 +687,7 @@ class GPT(nn.Module):
             kv_cache.advance(T)
 
         # Forward the lm_head (compute logits)
-        softcap = 15  # smoothly cap the logits to the range [-softcap, softcap]
+        softcap = self.config.logit_softcap
         logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., : self.config.vocab_size]  # slice to remove padding
         logits = logits.float()  # switch to fp32 for logit softcap and loss computation
