@@ -4,12 +4,8 @@
 
 This project develops a **looped (depth-recurrent) transformer architecture** that scales test-time compute by iterating a recurrent block in latent space, rather than producing more tokens (like Chain-of-Thought). This allows the model to "think" in continuous high-dimensional space before emitting each token.
 
-## Upstream Repository
-This is a fork of [karpathy/nanochat](https://github.com/karpathy/nanochat). To cherry-pick commits from upstream:
-```bash
-git fetch upstream
-git cherry-pick <commit-hash>
-```
+## Repository
+Forked from [karpathy/nanochat](https://github.com/karpathy/nanochat). Note: Some code comments or variable names may reference the original non-looped architecture.
 
 ## Philosophy
 Research code optimized for rapid iteration and debugging:

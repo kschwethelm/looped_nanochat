@@ -6,7 +6,7 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
-## 2026-02-08: Hyperparameter Tuning
+## 2026-02-08: Hyperparameter Tuning (d79bc25)
 
 Swept hyperparameters at S12 (768 width, ~158M params, ratio=4, fixed r=4) to check whether the looped architecture needs different settings from the non-looped defaults.
 
@@ -61,7 +61,7 @@ All within noise. Default 0.4 is fine.
 
 **Future work:** Try Muon LR = 0.01 on s20 model, tune embedding and unembedding lr (expected little impact).
 
-## 2026-02-01: Initial Scaling Laws
+## 2026-02-01: Initial Scaling Laws (5ea018d)
 
 > **Note:** all scaling-law runs here use a fixed recursion depth for the FLOPs budget. In practice *r* is sampled from a Poisson log-normal with mean 4 during training, so the per-step FLOPs fluctuate around this value. Using the mean as a single point estimate is ok for now.
 
