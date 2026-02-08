@@ -108,7 +108,7 @@ def place_eval_bundle(file_path):
     print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
 
 
-def evaluate_core(model, tokenizer, device, max_per_task=-1):
+def evaluate_core(model, tokenizer, device, max_per_task=-1, num_recur=None):
     """
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
@@ -160,7 +160,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         if max_per_task > 0:
             data = data[:max_per_task]
 
-        accuracy = evaluate_task(model, tokenizer, data, device, task_meta)
+        accuracy = evaluate_task(model, tokenizer, data, device, task_meta, num_recur=num_recur)
         results[label] = accuracy
         random_baseline = random_baselines[label]
         centered_result = (accuracy - 0.01 * random_baseline) / (1.0 - 0.01 * random_baseline)
@@ -189,6 +189,7 @@ def main():
     parser.add_argument("--device-batch-size", type=int, default=32, help="Per-device batch size for BPB evaluation")
     parser.add_argument("--split-tokens", type=int, default=40 * 524288, help="Number of tokens to evaluate per split for BPB")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+    parser.add_argument("--num-recur", type=int, default=None, help="Number of recurrent iterations (default = model's train_recur_mean)")
     args = parser.parse_args()
 
     # Parse evaluation modes
@@ -215,8 +216,13 @@ def main():
         model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=args.model_tag, step=args.step)
         sequence_len = meta["model_config"]["sequence_len"]
         token_bytes = get_token_bytes(device=device)
-        model_name = f"base_model (step {meta['step']})"
-        model_slug = f"base_model_{meta['step']:06d}"
+
+        # Determine effective num_recur for naming
+        effective_num_recur = args.num_recur if args.num_recur is not None else meta["train_config"].get("train_recur_mean")
+
+        # Build model name and slug that includes model_tag, step, and num_recur
+        model_name = f"{args.model_tag} (step {meta['step']}, num_recur={effective_num_recur})"
+        model_slug = f"{args.model_tag}_step{meta['step']:06d}_recur{effective_num_recur}"
 
     print0(f"Evaluating model: {model_name}")
     print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
@@ -233,7 +239,7 @@ def main():
         print0("CORE Evaluation")
         print0("=" * 80)
         with autocast_ctx:
-            core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task)
+            core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task, num_recur=args.num_recur)
 
         # Write CSV output
         if ddp_rank == 0:
@@ -267,9 +273,20 @@ def main():
                 tokenizer, args.device_batch_size, sequence_len, split_name, device=device
             )
             with autocast_ctx:
-                bpb = evaluate_bpb(model, loader, steps, token_bytes)
+                bpb = evaluate_bpb(model, loader, steps, token_bytes, num_recur=args.num_recur)
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")
+
+        # Write BPB results to CSV
+        if ddp_rank == 0 and bpb_results:
+            base_dir = get_base_dir()
+            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}_bpb.csv")
+            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+            with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
+                f.write("Split,BPB\n")
+                for split_name, bpb in sorted(bpb_results.items()):
+                    f.write(f"{split_name},{bpb:.6f}\n")
+            print0(f"\nBPB results written to: {output_csv_path}")
 
     # --- Sampling ---
     if "sample" in eval_modes and not is_hf_model:
@@ -291,7 +308,7 @@ def main():
             for prompt in prompts:
                 tokens = tokenizer(prompt, prepend="<|bos|>")
                 with autocast_ctx:
-                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0, num_recur=None)
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0, num_recur=args.num_recur)
                 sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
@@ -300,7 +317,7 @@ def main():
             print0("\nUnconditioned samples:")
             tokens = tokenizer("", prepend="<|bos|>")
             with autocast_ctx:
-                uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0, num_recur=None)
+                uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0, num_recur=args.num_recur)
             for sample in uncond:
                 sample_str = tokenizer.decode(sample)
                 print0("-" * 80)

@@ -113,6 +113,7 @@ parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluat
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
+parser.add_argument("--log-every", type=int, default=100, help="log detailed metrics to wandb every N steps")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 # Gradient tracking
@@ -480,6 +481,12 @@ while True:
     for _micro_step in range(grad_accum_steps):
         # Sample number of recurrences from Poisson log-normal distribution (per Geiping et al. (2025) Section 3.3)
         # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
+        # NOTE: Sampling happens per micro-batch (inside gradient accumulation loop), and each GPU samples
+        # independently. This creates training diversity (e.g., 2 GPUs × 4 grad_accum_steps = 8 different
+        # recursion depths per optimizer step), at the cost of potential load imbalance when GPUs sample
+        # very different num_recur values. The amount of diversity depends on grad_accum_steps, which is
+        # determined by device_batch_size - a potential downside as recursion diversity becomes coupled
+        # to batch size choices.
         if args.no_sample_recur:
             num_recur = None
         else:

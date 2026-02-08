@@ -403,7 +403,7 @@ def compute_gradient_stats(model: torch.nn.Module, track_level: str) -> dict[str
                 prelude_grad_norm_sq += grad_norm_sq
                 prelude_param_l1 += param_l1
                 prelude_param_norm_sq += param_norm_sq
-            elif "recur_block" in name or "loop" in name:
+            elif ".recur." in name or "transformer.recur" in name:
                 recur_grad_l1 += grad_l1
                 recur_grad_norm_sq += grad_norm_sq
                 recur_param_l1 += param_l1

@@ -5,6 +5,8 @@
 
 This project develops a **looped (depth-recurrent) transformer architecture** that scales test-time compute by iterating a recurrent block in latent space, rather than producing more tokens (like Chain-of-Thought). This allows the model to "think" in continuous high-dimensional space before emitting each token.
 
+See [Looped Log](dev/LoopedLOG.md) for a running log of experiments and interesting findings.
+
 ## Architecture
 
 Follows Huginn architecture (Geiping et al., 2025). Some experiments were already done by [Trelis Research](https://github.com/TrelisResearch/nanochat/tree/recursive) but we start from scratch.

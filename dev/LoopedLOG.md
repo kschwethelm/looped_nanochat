@@ -6,6 +6,61 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
+## 2026-02-08: Hyperparameter Tuning
+
+Swept hyperparameters at S12 (768 width, ~158M params, ratio=4, fixed r=4) to check whether the looped architecture needs different settings from the non-looped defaults.
+
+**Stage 1: Muon LR**
+| matrix_lr | val_bpb |
+|-----------|---------|
+| 0.005     | 0.9163  |
+| **0.01**  | **0.9108** |
+| 0.02      | 0.9143  |
+| 0.04      | 0.9751  |
+| 0.08      | 2.261 (diverged) |
+
+Small win for 0.01 over default 0.02 (~0.0035 bpb). Consistent with gradient accumulation across `bptt_k=4` recursions effectively doubling gradient magnitude, pushing optimal LR down ~2×. However, the gain is marginal — not enough to justify retraining existing models or deviating from the Muon standard 0.02.
+
+**Stage 2: Weight Decay**
+| weight_decay | val_bpb |
+|-------------|---------|
+| 0.05        | 0.9152  |
+| 0.1         | 0.9134  |
+| 0.2         | 0.9108  |
+| **0.4**     | **0.9093** |
+| 0.8         | 0.9273  |
+
+0.4 marginally best but only 0.0015 over default 0.2. Not worth changing — 0.2 has an established `WD ∝ 1/width²` scaling law across model sizes.
+
+**Stage 2b: Separate Weight Decay for Recurrent Block**
+
+Recurrent block has ~2× the L1 param/gradient norms of prelude/coda (expected from gradient accumulation across recursions). Tested whether reducing WD on the recurrent block (via `recur_wd_scale=0.5`) helps.
+
+| config | val_bpb |
+|--------|---------|
+| WD=0.2, recur_scale=0.5 | 0.9130 |
+| WD=0.4, recur_scale=0.5 | 0.9111 |
+| WD=0.2, uniform (baseline) | 0.9108 |
+
+No benefit from differential weight decay. Uniform WD is better in both cases. The recurrent block doesn't need special treatment despite its larger norms.
+
+**Stage 3: Warmdown Ratio**
+| warmdown_ratio | val_bpb |
+|----------------|---------|
+| 0.2            | 0.9146  |
+| 0.3            | 0.9127  |
+| **0.4**        | **0.9108** |
+| 0.5            | 0.9113  |
+| 0.6            | 0.9115  |
+
+All within noise. Default 0.4 is fine.
+
+**Decision:** Keep all defaults as-is (matrix_lr=0.02, weight_decay=0.2, warmdown=0.4). The looped architecture is not sensitive to hyperparameters beyond what's already tuned for non-looped. The only notable signal was matrix_lr=0.01, which we keep in mind for future reference but don't adopt — existing models and scaling law results remain valid at 0.02.
+
+**Implication for scaling law experiments:** The IsoFLOP sweeps run at default hyperparameters are not confounded by HP mismatch. The looped architecture's different scaling behavior (10:1 vs Chinchilla's 20:1) is a genuine architectural effect, not a tuning artifact.
+
+**Future work:** Try Muon LR = 0.01 on s20 model, tune embedding and unembedding lr (expected little impact).
+
 ## 2026-02-01: Initial Scaling Laws
 
 > **Note:** all scaling-law runs here use a fixed recursion depth for the FLOPs budget. In practice *r* is sampled from a Poisson log-normal with mean 4 during training, so the per-step FLOPs fluctuate around this value. Using the mean as a single point estimate is ok for now.

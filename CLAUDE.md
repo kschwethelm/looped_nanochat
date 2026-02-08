@@ -22,6 +22,7 @@ Research code optimized for rapid iteration and debugging:
 - Self-documenting names > comments
 - Use `pathlib.Path` for file paths (not `os.path`)
 - Save plots to `get_base_dir() + "/plots"` (not `plt.show()`)
+- Plots must be colorblind-accessible (use colorblind-safe palettes, distinct markers/linestyles)
 
 ## Conventions
 - Files: `snake_case.py`
