@@ -148,6 +148,13 @@ def plot_bpb_vs_recur(data: dict, output_path: Path):
             label=label,
         )
 
+    # Add visual marks for specific recurrence ranges
+    # Shaded region for num_recur=2-16
+    ax.axvspan(2, 16, alpha=0.15, color="gray", zorder=0, label="sample range")
+
+    # Vertical line mark at num_recur=4
+    ax.axvline(x=4, color="darkred", linestyle="--", linewidth=2, alpha=0.7, zorder=1, label="mean train recur")
+
     # Styling
     ax.set_xlabel("Number of Recurrences", fontsize=12, fontweight="bold")
     ax.set_ylabel("Validation BPB", fontsize=12, fontweight="bold")
