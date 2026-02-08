@@ -65,11 +65,18 @@ class GPTConfig:
     # - "passthrough": no injection, s passes through directly (pure recurrence, s initially from prelude)
     input_injection: Literal["inject_init_prelude", "inject_init_random", "passthrough"] = "inject_init_prelude"
     logit_softcap: float = 15.0  # smoothly cap logits to [-softcap, softcap] via tanh
+    # Exit gate (Ouro-style learned depth allocation)
+    use_exit_gate: bool = False
+    exit_beta: float = 0.05  # entropy regularization weight
+    exit_min_recur: int = 1  # do not allow exit before this many recurrences
+    exit_log_stats: bool = True  # enable diagnostic gate stats (used in uncompiled model)
 
     def __post_init__(self):
         valid_modes = {"inject_init_prelude", "inject_init_random", "passthrough"}
         if self.input_injection not in valid_modes:
             raise ValueError(f"input_injection must be one of {valid_modes}, got {self.input_injection}")
+        if self.exit_min_recur < 1:
+            raise ValueError(f"exit_min_recur must be >= 1, got {self.exit_min_recur}")
 
 
 def norm(x, eps: float = 1e-6):
@@ -87,6 +94,48 @@ class RMSNorm(nn.Module):
 
     def forward(self, x):
         return F.rms_norm(x, (x.size(-1),), eps=self.eps) * self.weight
+
+
+class ExitGate(nn.Module):
+    """Predict instantaneous exit probability lambda_t from recurrent state."""
+
+    def __init__(self, n_embd: int):
+        super().__init__()
+        self.proj = nn.Linear(n_embd, 1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.proj(x).squeeze(-1)
+        return torch.sigmoid(logits)
+
+
+def compute_exit_distribution(lambdas: torch.Tensor, min_recur: int = 1) -> torch.Tensor:
+    """
+    Compute exit-step distribution from instantaneous exit probabilities.
+
+    Args:
+        lambdas: Tensor of shape (Tmax, B, T) with values in (0, 1).
+        min_recur: Do not allow exiting before this many recurrences.
+
+    Returns:
+        p_exit: Tensor of shape (Tmax, B, T) that sums to 1 along Tmax.
+    """
+    if lambdas.ndim != 3:
+        raise ValueError(f"Expected lambdas shape (Tmax, B, T), got {tuple(lambdas.shape)}")
+    if min_recur < 1:
+        raise ValueError(f"min_recur must be >= 1, got {min_recur}")
+    num_recur = lambdas.size(0)
+    survival = torch.ones_like(lambdas[0])
+    p_exit = torch.zeros_like(lambdas)
+    for t in range(num_recur):
+        lambda_t = lambdas[t]
+        if t + 1 < min_recur:
+            lambda_t = torch.zeros_like(lambda_t)
+        if t < num_recur - 1:
+            p_exit[t] = lambda_t * survival
+            survival = survival * (1.0 - lambda_t)
+        else:
+            p_exit[t] = survival
+    return p_exit
 
 
 def apply_rotary_emb(x, cos, sin):
@@ -218,6 +267,7 @@ class GPT(nn.Module):
         self.norm_recur = RMSNorm(config.n_embd)  # at end of recurrent block (nc)
         self.norm_final = RMSNorm(config.n_embd)  # before lm_head
         self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
+        self.exit_gate = ExitGate(config.n_embd) if config.use_exit_gate else None
         # To support meta device initialization, we init the rotary embeddings here, but it's just "fake" meta tensors only.
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them by 10X, but assert fail if we ever reach that amount.
@@ -258,6 +308,12 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(block.attn.c_proj.weight)  # projections are zero
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
+
+        # Exit gate: initialize to near-uniform exit probabilities
+        if self.exit_gate is not None:
+            torch.nn.init.zeros_(self.exit_gate.proj.weight)
+            if self.exit_gate.proj.bias is not None:
+                torch.nn.init.zeros_(self.exit_gate.proj.bias)
 
         # Initialize inject layer as identity-like: output = e (first half of concat(e, s))
         # This ensures gradients flow on the first forward pass
@@ -460,6 +516,7 @@ class GPT(nn.Module):
         recur_block = sum(p.numel() for p in self.transformer.recur.parameters())
         coda = sum(p.numel() for p in self.transformer.coda.parameters())
         inject = sum(p.numel() for p in self.inject.parameters()) if self.config.input_injection != "passthrough" else 0
+        exit_gate = sum(p.numel() for p in self.exit_gate.parameters()) if self.exit_gate is not None else 0
 
         # Scalars: RMSNorm scale parameters
         scalars = (
@@ -468,7 +525,7 @@ class GPT(nn.Module):
             + sum(p.numel() for p in self.norm_final.parameters())
         )
 
-        total = wte + value_embeds + lm_head + prelude + recur_block + coda + inject + scalars
+        total = wte + value_embeds + lm_head + prelude + recur_block + coda + inject + exit_gate + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
 
         return {
@@ -479,6 +536,7 @@ class GPT(nn.Module):
             'recur_block': recur_block,
             'coda': coda,
             'inject': inject,
+            'exit_gate': exit_gate,
             'scalars': scalars,
             'total': total,
         }
@@ -505,7 +563,7 @@ class GPT(nn.Module):
         once = counts['wte'] + counts['lm_head'] + counts['prelude'] + counts['coda'] + counts['scalars']
 
         # Parameters that run num_recur times per forward pass
-        reused = counts['recur_block'] + counts['inject']
+        reused = counts['recur_block'] + counts['inject'] + counts['exit_gate']
 
         effective = once + (reused * num_recur)
         return effective
@@ -552,6 +610,19 @@ class GPT(nn.Module):
             # "inject_init_prelude" or "inject_init_random": use injection layer
             return self.inject(torch.cat([e, s], dim=-1))
 
+    def _compute_logits_from_state(self, s, cos_sin, kv_cache, kv_budget):
+        x = s
+        for i, block in enumerate(self.transformer.coda):
+            layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
+            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
+        x = self.norm_final(x)
+        softcap = self.config.logit_softcap
+        logits = self.lm_head(x)
+        logits = logits[..., : self.config.vocab_size]
+        logits = logits.float()
+        logits = softcap * torch.tanh(logits / softcap)
+        return logits
+
     def setup_optimizer(
         self,
         unembedding_lr=0.004,
@@ -588,7 +659,10 @@ class GPT(nn.Module):
         ]
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params)
+        exit_gate_params = list(self.exit_gate.parameters()) if self.exit_gate is not None else []
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(norm_params) + len(
+            exit_gate_params
+        )
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -601,6 +675,17 @@ class GPT(nn.Module):
             dict(kind="adamw", params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind="adamw", params=norm_params, lr=0.005 * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
         ]
+        if exit_gate_params:
+            param_groups.append(
+                dict(
+                    kind="adamw",
+                    params=exit_gate_params,
+                    lr=matrix_lr * dmodel_lr_scale,
+                    betas=adam_betas,
+                    eps=1e-10,
+                    weight_decay=0.0,
+                )
+            )
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
@@ -662,6 +747,13 @@ class GPT(nn.Module):
         s = None
 
         # 4. Recurrent block (run num_recur times)
+        use_exit_gate = self.config.use_exit_gate and targets is not None
+        if use_exit_gate and self.exit_gate is None:
+            raise ValueError("use_exit_gate=True but exit_gate is missing")
+        if use_exit_gate:
+            expected_loss = torch.zeros((B, T), device=idx.device, dtype=torch.float32)
+            entropy = torch.zeros_like(expected_loss)
+            survival = torch.ones_like(expected_loss)
         for i in range(num_recur):
             # State transfer: handles initialization (on i==0) and input injection
             u = self._state_transfer(e, s=s, warm_start_state=warm_start_state)
@@ -670,28 +762,51 @@ class GPT(nn.Module):
                 layer_idx = self._get_kv_layer_idx("recur", j, kv_budget, recur_iter=i)
                 u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx)
             s = self.norm_recur(u)  # nc: rescale at end of recurrent block
+            if use_exit_gate:
+                lambda_t = self.exit_gate(s).float()
+                if i + 1 < self.config.exit_min_recur:
+                    lambda_t = torch.zeros_like(lambda_t)
+                if i < num_recur - 1:
+                    p_exit_t = lambda_t * survival
+                    survival = survival * (1.0 - lambda_t)
+                else:
+                    p_exit_t = survival
+                logits_t = self._compute_logits_from_state(s, cos_sin, kv_cache=None, kv_budget=None)
+                loss_t = F.cross_entropy(
+                    logits_t.view(-1, logits_t.size(-1)),
+                    targets.view(-1),
+                    ignore_index=-1,
+                    reduction="none",
+                ).view(B, T)
+                expected_loss = expected_loss + p_exit_t * loss_t
+                entropy = entropy - p_exit_t * torch.log(p_exit_t.clamp_min(1e-12))
             # Truncated BPTT: detach gradients for recurrences before the last bptt_k
             # This limits gradient flow depth to bptt_k * n_recur_block layers through recurrence
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
 
+        if use_exit_gate:
+            if kv_cache is not None:
+                kv_cache.advance(T)
+            if loss_reduction == "none":
+                return expected_loss.view(-1)
+            token_mask = targets != -1
+            token_mask_f = token_mask.to(expected_loss.dtype)
+            expected_sum = (expected_loss * token_mask_f).sum()
+            entropy_sum = (entropy * token_mask_f).sum()
+            valid_count = token_mask_f.sum().clamp(min=1.0)
+            if loss_reduction == "sum":
+                return expected_sum - self.config.exit_beta * entropy_sum
+            if loss_reduction == "mean":
+                return expected_sum / valid_count - self.config.exit_beta * (entropy_sum / valid_count)
+            raise ValueError(f"Unsupported loss_reduction: {loss_reduction}")
+
         # 5. Coda blocks (run once)
-        x = s
-        for i, block in enumerate(self.transformer.coda):
-            layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
-            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
-        x = self.norm_final(x)
+        logits = self._compute_logits_from_state(s, cos_sin, kv_cache, kv_budget)
 
         # Advance KV cache position after all layers are done
         if kv_cache is not None:
             kv_cache.advance(T)
-
-        # Forward the lm_head (compute logits)
-        softcap = self.config.logit_softcap
-        logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
-        logits = logits[..., : self.config.vocab_size]  # slice to remove padding
-        logits = logits.float()  # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap)  # squash the logits
 
         if targets is not None:
             # training: given the targets, compute and return the loss
@@ -704,6 +819,146 @@ class GPT(nn.Module):
             return loss
         else:
             return logits, s  # Return logits and final state
+
+    @torch.no_grad()
+    def compute_exit_stats(self, idx, targets=None, num_recur=None, warm_start_state=None):
+        if self.exit_gate is None:
+            raise ValueError("compute_exit_stats requires exit_gate to be enabled")
+        B, T = idx.size()
+        if num_recur is None:
+            num_recur = int(self.config.train_recur_mean)
+
+        # Rotary embeddings (same path as forward, but no kv cache support needed here)
+        assert self.cos.size(1) >= T, f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
+        assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
+        cos_sin = (
+            self.cos[:, :T],
+            self.sin[:, :T],
+        )
+
+        x = self.transformer.wte(idx)
+        x = self.norm_emb(x)
+        for i, block in enumerate(self.transformer.prelude):
+            x = block(x, cos_sin, self.window_sizes[i], kv_cache=None, layer_idx=None)
+        e = x
+
+        s = None
+        entropy = torch.zeros((B, T), device=idx.device, dtype=torch.float32)
+        expected_t = torch.zeros_like(entropy)
+        survival = torch.ones_like(entropy)
+        p_last = None
+        for i in range(num_recur):
+            u = self._state_transfer(e, s=s, warm_start_state=warm_start_state)
+            for j, block in enumerate(self.transformer.recur):
+                u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache=None, layer_idx=None)
+            s = self.norm_recur(u)
+            lambda_t = self.exit_gate(s).float()
+            if i + 1 < self.config.exit_min_recur:
+                lambda_t = torch.zeros_like(lambda_t)
+            if i < num_recur - 1:
+                p_exit_t = lambda_t * survival
+                survival = survival * (1.0 - lambda_t)
+            else:
+                p_exit_t = survival
+            entropy = entropy - p_exit_t * torch.log(p_exit_t.clamp_min(1e-12))
+            expected_t = expected_t + p_exit_t * float(i + 1)
+            if i == num_recur - 1:
+                p_last = p_exit_t
+            if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
+                s = s.detach()
+
+        if targets is None:
+            token_mask = torch.ones((B, T), device=idx.device, dtype=torch.float32)
+        else:
+            token_mask = (targets != -1).to(torch.float32)
+        denom = token_mask.sum().clamp(min=1.0)
+        entropy_mean = (entropy * token_mask).sum() / denom
+        expected_t_mean = (expected_t * token_mask).sum() / denom
+        p_last_mean = (p_last * token_mask).sum() / denom if p_last is not None else torch.tensor(0.0, device=idx.device)
+        return {
+            "entropy": entropy_mean,
+            "expected_t": expected_t_mean,
+            "p_last": p_last_mean,
+        }
+
+    @torch.no_grad()
+    def forward_adaptive_exit(
+        self,
+        idx,
+        kv_cache=None,
+        warm_start_state=None,
+        exit_q=0.5,
+        exit_max_recur=None,
+        exit_min_recur=None,
+    ):
+        if self.exit_gate is None:
+            raise ValueError("forward_adaptive_exit requires exit_gate to be enabled")
+        if exit_q is None:
+            raise ValueError("exit_q must be provided for adaptive exit")
+        if not 0.0 <= exit_q <= 1.0:
+            raise ValueError(f"exit_q must be in [0, 1], got {exit_q}")
+
+        B, T = idx.size()
+        if exit_max_recur is None:
+            exit_max_recur = int(self.config.train_recur_max)
+        if exit_min_recur is None:
+            exit_min_recur = int(self.config.exit_min_recur)
+        if exit_min_recur < 1:
+            raise ValueError(f"exit_min_recur must be >= 1, got {exit_min_recur}")
+        if exit_max_recur < 1:
+            raise ValueError(f"exit_max_recur must be >= 1, got {exit_max_recur}")
+
+        kv_budget = kv_cache.kv_budget if kv_cache is not None else None
+
+        # Grab the rotary embeddings for the current sequence length
+        assert self.cos.size(1) >= T, f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
+        assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
+        T0 = 0 if kv_cache is None else kv_cache.get_pos()
+        cos_sin = (
+            self.cos[:, T0 : T0 + T],
+            self.sin[:, T0 : T0 + T],
+        )
+
+        # 1. Embedding + norm
+        x = self.transformer.wte(idx)
+        x = self.norm_emb(x)
+
+        # 2. Prelude blocks (run once)
+        for i, block in enumerate(self.transformer.prelude):
+            layer_idx = self._get_kv_layer_idx("prelude", i, kv_budget)
+            x = block(x, cos_sin, self.window_sizes[i], kv_cache, layer_idx)
+        e = x
+
+        # 3. Recurrent block with adaptive exit
+        s = None
+        survival_last = torch.ones((B,), device=idx.device, dtype=torch.float32)
+        for i in range(exit_max_recur):
+            u = self._state_transfer(e, s=s, warm_start_state=warm_start_state)
+            for j, block in enumerate(self.transformer.recur):
+                layer_idx = self._get_kv_layer_idx("recur", j, kv_budget, recur_iter=i)
+                u = block(u, cos_sin, self.window_sizes[self.config.n_prelude + j], kv_cache, layer_idx)
+            s = self.norm_recur(u)
+            lambda_last = self.exit_gate(s).float()[:, -1]
+            if i + 1 < exit_min_recur:
+                lambda_last = torch.zeros_like(lambda_last)
+            if i < exit_max_recur - 1:
+                survival_last = survival_last * (1.0 - lambda_last)
+                cdf_last = 1.0 - survival_last
+                if i + 1 >= exit_min_recur and torch.all(cdf_last >= exit_q):
+                    break
+            else:
+                break
+            if self.config.bptt_k is not None and i < exit_max_recur - self.config.bptt_k:
+                s = s.detach()
+
+        # 4. Coda blocks (run once)
+        logits = self._compute_logits_from_state(s, cos_sin, kv_cache, kv_budget)
+
+        if kv_cache is not None:
+            kv_cache.advance(T)
+        return logits, s
 
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, num_recur=None):

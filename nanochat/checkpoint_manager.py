@@ -36,6 +36,20 @@ def _patch_missing_config_keys(model_config_kwargs):
         model_config_kwargs["input_injection"] = "inject_init_prelude"
         log0("Patching missing input_injection in model config to 'inject_init_prelude'")
 
+    # Exit gate defaults for backward compatibility
+    if "use_exit_gate" not in model_config_kwargs:
+        model_config_kwargs["use_exit_gate"] = False
+        log0("Patching missing use_exit_gate in model config to False")
+    if "exit_beta" not in model_config_kwargs:
+        model_config_kwargs["exit_beta"] = 0.05
+        log0("Patching missing exit_beta in model config to 0.05")
+    if "exit_min_recur" not in model_config_kwargs:
+        model_config_kwargs["exit_min_recur"] = 1
+        log0("Patching missing exit_min_recur in model config to 1")
+    if "exit_log_stats" not in model_config_kwargs:
+        model_config_kwargs["exit_log_stats"] = True
+        log0("Patching missing exit_log_stats in model config to True")
+
     # Remove deprecated config keys
     deprecated_keys = ["kv_cache_recur_budget", "inject_mode", "recur_warm_start"]
     for key in deprecated_keys:

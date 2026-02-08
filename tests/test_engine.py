@@ -28,6 +28,7 @@ class MockConfig:
     n_recur_block: int = 1
     n_coda: int = 1
     train_recur_mean: float = 1.0
+    use_exit_gate: bool = True
 
 
 class MockModel:
@@ -41,6 +42,7 @@ class MockModel:
         self.vocab_size = vocab_size
         self.config = MockConfig()
         self._device = torch.device("cpu")
+        self.adaptive_exit_calls = 0
 
     def get_device(self):
         return self._device
@@ -58,6 +60,18 @@ class MockModel:
         if warm_start_state is None:
             warm_start_state = torch.zeros(B, T, self.config.n_embd)
         return logits, warm_start_state
+
+    def forward_adaptive_exit(
+        self,
+        ids,
+        kv_cache=None,
+        warm_start_state=None,
+        exit_q=0.5,
+        exit_max_recur=None,
+        exit_min_recur=None,
+    ):
+        self.adaptive_exit_calls += 1
+        return self.forward(ids, kv_cache=kv_cache, num_recur=exit_max_recur, warm_start_state=warm_start_state)
 
 
 class ByteTokenizer:
@@ -248,6 +262,23 @@ def test_temperature_zero_determinism():
     assert r1 == r2 == r3, (
         "Temperature=0 must result in the same output for the same prompt regardless of seed."
     )
+
+
+def test_adaptive_exit_path_is_used():
+    """Engine should use forward_adaptive_exit when adaptive_exit_q is set."""
+    model = MockModel()
+    tokenizer = ByteTokenizer()
+    engine = Engine(model, tokenizer)
+    prompt = [261, 72, 101, 108, 108, 111]
+
+    engine.generate_batch(
+        prompt,
+        max_tokens=2,
+        temperature=0.0,
+        adaptive_exit_q=0.5,
+        adaptive_exit_max_recur=2,
+    )
+    assert model.adaptive_exit_calls > 0, "forward_adaptive_exit should be called when adaptive_exit_q is set"
 
 
 def test_max_tokens_respected():
