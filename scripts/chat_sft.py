@@ -15,6 +15,7 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 from contextlib import nullcontext
+from dataclasses import asdict
 
 import torch
 import torch.distributed as dist
@@ -358,14 +359,7 @@ while True:
             {
                 "step": step,
                 "val_bpb": val_bpb,  # loss at last step
-                "model_config": {
-                    "sequence_len": args.max_seq_len,
-                    "vocab_size": tokenizer.get_vocab_size(),
-                    "size": size,
-                    "n_head": model.config.n_head,
-                    "n_kv_head": model.config.n_kv_head,
-                    "n_embd": model.config.n_embd,
-                },
+                "model_config": asdict(model.config),
                 "user_config": user_config,  # inputs to the training script
             },
         )
