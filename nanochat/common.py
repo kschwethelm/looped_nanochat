@@ -157,6 +157,91 @@ def sample_poisson_lognormal_recurrence(mean_recur: float, sigma: float = 0.5, m
     return int(num_recur)
 
 
+def sample_num_recurs_for_step(
+    recur_samples_per_step: int | None,
+    mean_recur: float,
+    sigma: float,
+    max_recur: int | None,
+    ddp: bool,
+    master_process: bool,
+    device: torch.device,
+) -> list[int] | None:
+    """
+    Pre-sample all num_recur values for an optimization step.
+
+    Samples are drawn on rank 0 and broadcast to all ranks for synchronization.
+    Returns None if recur_samples_per_step is None/0 (fixed mode).
+
+    Args:
+        recur_samples_per_step: Number of different num_recur values to sample (global across all ranks)
+        mean_recur: Mean number of recurrences for sampling
+        sigma: Standard deviation for log-normal component
+        max_recur: Maximum recurrence value
+        ddp: Whether DDP is enabled
+        master_process: Whether this is the master process (rank 0)
+        device: Device for tensor operations
+
+    Returns:
+        List of sampled num_recur values, or None for fixed mode
+    """
+    if not recur_samples_per_step:
+        return None
+
+    # Rank 0 samples all values
+    if master_process:
+        sampled_num_recurs = [
+            sample_poisson_lognormal_recurrence(mean_recur=mean_recur, sigma=sigma, max_recur=max_recur)
+            for _ in range(recur_samples_per_step)
+        ]
+    else:
+        sampled_num_recurs = [0] * recur_samples_per_step  # placeholder
+
+    # Broadcast to all ranks
+    if ddp:
+        num_recur_tensor = torch.tensor(sampled_num_recurs, dtype=torch.int32, device=device)
+        dist.broadcast(num_recur_tensor, src=0)
+        sampled_num_recurs = num_recur_tensor.tolist()
+
+    return sampled_num_recurs
+
+
+def get_num_recur_for_microstep(
+    sampled_num_recurs: list[int] | None,
+    micro_step: int,
+    ddp_rank: int,
+    ddp_world_size: int,
+    grad_accum_steps: int,
+    recur_samples_per_step: int,
+) -> int | None:
+    """
+    Get the num_recur value for a specific micro-step.
+
+    Uses global micro-step indexing across all ranks to determine which
+    sampled value to use for this micro-step.
+
+    Args:
+        sampled_num_recurs: Pre-sampled values from sample_num_recurs_for_step()
+        micro_step: Local micro-step index (0 to grad_accum_steps-1)
+        ddp_rank: Rank of this process in DDP
+        ddp_world_size: Total number of ranks
+        grad_accum_steps: Number of gradient accumulation steps per rank
+        recur_samples_per_step: Number of samples per step (global)
+
+    Returns:
+        num_recur value for this micro-step, or None for fixed mode (use model default)
+    """
+    if sampled_num_recurs is None:
+        return None
+
+    # Compute global micro-step index across all ranks
+    total_micro_steps = ddp_world_size * grad_accum_steps
+    global_micro_step = ddp_rank * grad_accum_steps + micro_step
+    microsteps_per_sample = total_micro_steps // recur_samples_per_step
+    sample_idx = global_micro_step // microsteps_per_sample
+
+    return sampled_num_recurs[sample_idx]
+
+
 def is_ddp_requested() -> bool:
     """
     True if launched by torchrun (env present), even before init.

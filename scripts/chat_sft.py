@@ -28,8 +28,9 @@ from nanochat.common import (
     compute_gradient_stats,
     compute_init,
     get_base_dir,
+    get_num_recur_for_microstep,
     print0,
-    sample_poisson_lognormal_recurrence,
+    sample_num_recurs_for_step,
 )
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.tokenizer import get_token_bytes
@@ -68,7 +69,12 @@ parser.add_argument("--init-lr-frac", type=float, default=1.0, help="initial LR 
 parser.add_argument("--eval-every", type=int, default=150, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=20 * 524288, help="number of tokens to evaluate val loss on")
 # Recurrence
-parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use model default")
+parser.add_argument(
+    "--recur-samples-per-step",
+    type=int,
+    default=8,
+    help="Number of different num_recur values per gradient accumulation step (None = fixed, use model default)",
+)
 # Output
 parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
 # Gradient tracking
@@ -104,8 +110,8 @@ if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_s
         f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?"
     )
 orig_model = model
-# Use dynamic=False when sample_recur is enabled (varying num_recur causes recompilation otherwise)
-model = torch.compile(model, dynamic=None if args.no_sample_recur else False)
+# Use dynamic=False when recur sampling is enabled (varying num_recur causes recompilation otherwise)
+model = torch.compile(model, dynamic=bool(args.recur_samples_per_step))
 size = model.config.size
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len  # tokens per iteration for a single rank
@@ -115,6 +121,23 @@ grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+# Validate recur-samples-per-step (global across all ranks)
+if args.recur_samples_per_step:
+    total_micro_steps = ddp_world_size * grad_accum_steps
+    if args.recur_samples_per_step > total_micro_steps:
+        raise ValueError(
+            f"--recur-samples-per-step ({args.recur_samples_per_step}) cannot exceed total micro-steps ({total_micro_steps} = {ddp_world_size} ranks * {grad_accum_steps} steps). "
+            f"Decrease --recur-samples-per-step or --device-batch-size."
+        )
+    if total_micro_steps % args.recur_samples_per_step != 0:
+        raise ValueError(
+            f"Total micro-steps ({total_micro_steps} = {ddp_world_size} ranks * {grad_accum_steps} steps) must be evenly divisible by --recur-samples-per-step ({args.recur_samples_per_step}). "
+            f"Adjust --device-batch-size to change grad_accum_steps."
+        )
+    microsteps_per_sample = total_micro_steps // args.recur_samples_per_step
+    print0(f"Recurrence sampling: {args.recur_samples_per_step} global samples per step ({microsteps_per_sample} microsteps each across {ddp_world_size} ranks)")
+else:
+    print0(f"Recurrence sampling: fixed (using model default)")
 token_bytes = get_token_bytes(device=device)
 
 # Initialize the Optimizer
@@ -355,17 +378,29 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+
+    # Pre-sample all num_recur values for this step (global across all ranks)
+    sampled_num_recurs = sample_num_recurs_for_step(
+        recur_samples_per_step=args.recur_samples_per_step,
+        mean_recur=model.config.train_recur_mean,
+        sigma=0.5,
+        max_recur=model.config.train_recur_max,
+        ddp=ddp,
+        master_process=master_process,
+        device=device,
+    )
+
     for _micro_step in range(grad_accum_steps):
-        # Sample number of recurrences from Poisson log-normal distribution
-        # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
-        if args.no_sample_recur:
-            num_recur = None
-        else:
-            num_recur = sample_poisson_lognormal_recurrence(
-                mean_recur=model.config.train_recur_mean,
-                sigma=0.5,
-                max_recur=model.config.train_recur_max,
-            )
+        # Get num_recur for this micro-step
+        num_recur = get_num_recur_for_microstep(
+            sampled_num_recurs=sampled_num_recurs,
+            micro_step=_micro_step,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+            grad_accum_steps=grad_accum_steps,
+            recur_samples_per_step=args.recur_samples_per_step,
+        )
+
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
@@ -410,12 +445,19 @@ while True:
     flops_per_sec = num_flops_per_token * args.total_batch_size / dt
     promised_flops_per_sec_h100 = 989e12 * ddp_world_size  # bfloat16 H100 SXM and without 2:4 sparsity
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100  # in %
-    # For logging: use actual num_recur if sampled, otherwise the fixed default
-    logged_num_recur = num_recur if num_recur is not None else int(model.config.train_recur_mean)
+    # For logging: report num_recur info
+    if sampled_num_recurs is None:
+        # Fixed: use model default
+        logged_num_recur = int(model.config.train_recur_mean)
+        logged_num_recur_str = f"{logged_num_recur}"
+    else:
+        # Sampled: report all values and mean
+        logged_num_recur = sum(sampled_num_recurs) / len(sampled_num_recurs)  # mean for wandb
+        logged_num_recur_str = f"{sampled_num_recurs} (mean={logged_num_recur:.1f})"
     if step > 10:
         total_training_time += dt  # only count the time after the first 10 steps
     print0(
-        f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | num_recur: {logged_num_recur} | total time: {total_training_time / 60:.2f}m"
+        f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | num_recur: {logged_num_recur_str} | total time: {total_training_time / 60:.2f}m"
     )
     if step % 10 == 0:
         wandb_run.log(
