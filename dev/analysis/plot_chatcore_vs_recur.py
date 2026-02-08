@@ -51,7 +51,7 @@ def parse_chatcore_from_report(report_path: Path) -> float | None:
                 line = line.strip()
                 if line.startswith("- ChatCORE metric:"):
                     # Extract float value after the colon
-                    value_str = line.split(":", 1)[1].strip()
+                    value_str = line.split(":", 1)[1].strip().split()[0]
                     return float(value_str)
     except (OSError, ValueError):
         return None

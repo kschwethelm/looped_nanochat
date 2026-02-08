@@ -328,19 +328,23 @@ if __name__ == "__main__":
 
         all_results[recur_label] = results
 
-        # calculate the ChatCORE metric if we can (similar to CORE, it's the mean centered accuracy)
+        # calculate the ChatCORE metric (similar to CORE, it's the mean centered accuracy)
         # this way, ChatCORE ranges from 0 (at random baseline) to 1 (peak performance)
-        all_tasks_were_evaluated = all(task_name in results for task_name in all_tasks)
-        chatcore_metric_dict = {}
-        if all_tasks_were_evaluated:
-            centered_mean = 0
-            for task_name, acc in results.items():
-                baseline_acc = baseline_accuracies.get(task_name, 0.0)
-                centered_acc = (acc - baseline_acc) / (1.0 - baseline_acc)
-                centered_mean += centered_acc
-            chatcore_metric = centered_mean / len(results)
-            chatcore_metric_dict = {"ChatCORE metric": chatcore_metric}
-            print0(f"ChatCORE metric ({recur_label}): {chatcore_metric:.4f}")
+        # missing tasks are assumed to have 0 accuracy (baseline performance)
+        missing_tasks = [t for t in all_tasks if t not in results]
+        full_results = {t: results.get(t, 0.0) for t in all_tasks}
+        centered_mean = 0
+        for task_name, acc in full_results.items():
+            baseline_acc = baseline_accuracies[task_name]
+            centered_acc = (acc - baseline_acc) / (1.0 - baseline_acc)
+            centered_mean += centered_acc
+        chatcore_metric = centered_mean / len(all_tasks)
+        partial_hint = ""
+        if missing_tasks:
+            partial_hint = " (partial: missing tasks assumed 0)"
+            print0(f"  Note: {', '.join(missing_tasks)} not tested, assumed 0 for ChatCORE")
+        chatcore_metric_dict = {"ChatCORE metric": chatcore_metric}
+        print0(f"ChatCORE metric ({recur_label}): {chatcore_metric:.4f}{partial_hint}")
 
         # Log to report for this recur value
         section_name = f"Chat evaluation {args.source}"
@@ -348,12 +352,14 @@ if __name__ == "__main__":
             section_name += f" {args.model_tag}"
         if num_recur is not None:
             section_name += f" (r={num_recur})"
+        not_tested_dict = {t: "Not tested (assumed 0 for ChatCORE)" for t in missing_tasks}
         get_report().log(
             section=section_name,
             data=[
                 vars(args),
                 {"num_recur_here": num_recur},
                 results,
+                not_tested_dict,
                 chatcore_metric_dict,
             ],
         )
