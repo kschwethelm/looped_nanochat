@@ -48,9 +48,11 @@ def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
     # Exit gate: zero-init weight and bias so sigmoid(0)=0.5 uniform exit prob
     if model_config.use_exit_gate and "exit_gate.proj.weight" not in model_data:
+        # Match device/dtype of existing checkpoint tensors
+        ref = next(iter(model_data.values()))
         log0("Patching missing exit_gate params (zero-init → sigmoid(0)=0.5 uniform exit prob)")
-        model_data["exit_gate.proj.weight"] = torch.zeros(1, model_config.n_embd)
-        model_data["exit_gate.proj.bias"] = torch.zeros(1)
+        model_data["exit_gate.proj.weight"] = torch.zeros(1, model_config.n_embd, device=ref.device, dtype=ref.dtype)
+        model_data["exit_gate.proj.bias"] = torch.zeros(1, device=ref.device, dtype=ref.dtype)
 
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
