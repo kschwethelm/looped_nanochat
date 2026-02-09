@@ -66,10 +66,9 @@ class GPTConfig:
     input_injection: Literal["inject_init_prelude", "inject_init_random", "passthrough"] = "inject_init_prelude"
     logit_softcap: float = 15.0  # smoothly cap logits to [-softcap, softcap] via tanh
     # Exit gate (Ouro-style learned depth allocation)
-    use_exit_gate: bool = False
+    use_exit_gate: bool = True
     exit_beta: float = 0.05  # entropy regularization weight
     exit_min_recur: int = 1  # do not allow exit before this many recurrences
-    exit_log_stats: bool = True  # enable diagnostic gate stats (used in uncompiled model)
 
     def __post_init__(self):
         valid_modes = {"inject_init_prelude", "inject_init_random", "passthrough"}

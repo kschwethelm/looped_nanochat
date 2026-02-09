@@ -36,20 +36,6 @@ def _patch_missing_config_keys(model_config_kwargs):
         model_config_kwargs["input_injection"] = "inject_init_prelude"
         log0("Patching missing input_injection in model config to 'inject_init_prelude'")
 
-    # Exit gate defaults for backward compatibility
-    if "use_exit_gate" not in model_config_kwargs:
-        model_config_kwargs["use_exit_gate"] = False
-        log0("Patching missing use_exit_gate in model config to False")
-    if "exit_beta" not in model_config_kwargs:
-        model_config_kwargs["exit_beta"] = 0.05
-        log0("Patching missing exit_beta in model config to 0.05")
-    if "exit_min_recur" not in model_config_kwargs:
-        model_config_kwargs["exit_min_recur"] = 1
-        log0("Patching missing exit_min_recur in model config to 1")
-    if "exit_log_stats" not in model_config_kwargs:
-        model_config_kwargs["exit_log_stats"] = True
-        log0("Patching missing exit_log_stats in model config to True")
-
     # Remove deprecated config keys
     deprecated_keys = ["kv_cache_recur_budget", "inject_mode", "recur_warm_start"]
     for key in deprecated_keys:
@@ -60,8 +46,11 @@ def _patch_missing_config_keys(model_config_kwargs):
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
-    # No patches currently needed
-    pass
+    # Exit gate: zero-init weight and bias so sigmoid(0)=0.5 uniform exit prob
+    if model_config.use_exit_gate and "exit_gate.proj.weight" not in model_data:
+        log0("Patching missing exit_gate params (zero-init → sigmoid(0)=0.5 uniform exit prob)")
+        model_data["exit_gate.proj.weight"] = torch.zeros(1, model_config.n_embd)
+        model_data["exit_gate.proj.bias"] = torch.zeros(1)
 
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):

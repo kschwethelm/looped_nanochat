@@ -241,7 +241,6 @@ model_config_kwargs = {
     "use_exit_gate": args.use_exit_gate,
     "exit_beta": args.exit_beta,
     "exit_min_recur": args.exit_min_recur,
-    "exit_log_stats": args.exit_log_stats,
 }
 with torch.device("meta"):
     # All tensors are created as meta tensors (they have shape/dtype but no data)
@@ -586,7 +585,7 @@ while True:
             "muon/weight_decay": muon_weight_decay, # Muon weight decay schedule value
             **{f"model_health/{k}": v for k, v in model_health_stats.items()},  # Add model health stats
         }
-        if orig_model.config.use_exit_gate and orig_model.config.exit_log_stats:
+        if orig_model.config.use_exit_gate and args.exit_log_stats:
             stats_batch = min(2, x.size(0))
             stats_x = x[:stats_batch]
             stats_y = y[:stats_batch]

@@ -3,6 +3,10 @@ Stage II: focused exit gate training (Ouro-style).
 
 This script freezes the base LM and trains only the exit gate using
 per-step marginal loss improvements.
+
+Supports training after either base pretraining or SFT:
+    python -m scripts.exit_gate_train --source base --model-tag s12
+    python -m scripts.exit_gate_train --source sft --model-tag s12
 """
 
 import argparse
@@ -24,7 +28,7 @@ from nanochat.common import (
     print0,
     sample_poisson_lognormal_recurrence,
 )
-from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.dataloader import sft_data_loader, tokenizing_distributed_data_loader_with_state_bos_bestfit
 
 
 def compute_gate_loss(model, idx, targets, num_recur, k, gamma):
@@ -86,6 +90,7 @@ def main():
     parser = argparse.ArgumentParser(description="Stage II exit gate training")
     parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+    parser.add_argument("--source", type=str, choices=["base", "sft"], default="base", help="checkpoint source: 'base' (pretraining) or 'sft' (chat fine-tuned)")
     parser.add_argument("--model-tag", type=str, required=True, help="model tag to load from")
     parser.add_argument("--step", type=int, default=None, help="model step to load (default = last)")
     parser.add_argument("--output-tag", type=str, default=None, help="model tag to save to (default = '<model-tag>_gate')")
@@ -113,7 +118,7 @@ def main():
     use_dummy_wandb = args.run == "dummy" or not master_process
     wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
 
-    model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.step)
+    model, tokenizer, meta = load_model(args.source, device, phase="train", model_tag=args.model_tag, step=args.step)
     if not model.config.use_exit_gate or model.exit_gate is None:
         raise ValueError("Stage II requires a checkpoint trained with use_exit_gate=True")
 
@@ -140,16 +145,50 @@ def main():
     print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {max_seq_len} = {tokens_per_fwdbwd:,}")
     print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
-    train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
-        tokenizer,
-        B=args.device_batch_size,
-        T=max_seq_len,
-        split="train",
-        device=device,
-    )
+    if args.source == "sft":
+        from tasks.common import TaskMixture
+        from tasks.customjson import CustomJSON
+        from tasks.gsm8k import GSM8K
+        from tasks.mmlu import MMLU
+        from tasks.smoltalk import SmolTalk
+        from tasks.spellingbee import SimpleSpelling, SpellingBee
+
+        base_dir = get_base_dir()
+        identity_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
+        train_dataset = TaskMixture(
+            [
+                SmolTalk(split="train"),
+                MMLU(subset="auxiliary_train", split="train"),
+                GSM8K(subset="main", split="train"),
+                GSM8K(subset="main", split="train"),
+                CustomJSON(filepath=identity_filepath),
+                CustomJSON(filepath=identity_filepath),
+                SimpleSpelling(size=200000, split="train"),
+                SpellingBee(size=80000, split="train"),
+            ]
+        )
+        train_loader = sft_data_loader(
+            tokenizer,
+            dataset=train_dataset,
+            B=args.device_batch_size,
+            T=max_seq_len,
+            device=device,
+            device_type=device_type,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+        )
+    else:
+        train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+            tokenizer,
+            B=args.device_batch_size,
+            T=max_seq_len,
+            split="train",
+            device=device,
+        )
 
     output_tag = args.output_tag or f"{args.model_tag}_gate"
-    output_dir = os.path.join(get_base_dir(), "base_checkpoints", output_tag)
+    checkpoint_subdir = "chatsft_checkpoints" if args.source == "sft" else "base_checkpoints"
+    output_dir = os.path.join(get_base_dir(), checkpoint_subdir, output_tag)
 
     step = 0
     while step < args.steps:

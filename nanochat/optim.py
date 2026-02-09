@@ -367,6 +367,8 @@ class DistMuonAdamW(torch.optim.Optimizer):
         param_infos = {}
         for p in group['params']:
             grad = p.grad
+            if grad is None:
+                continue
             if p.numel() < 1024:
                 # Small params: all_reduce (no scatter/gather needed)
                 future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
