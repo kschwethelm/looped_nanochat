@@ -134,7 +134,7 @@ def print_banner():
     print0(banner)
 
 
-def sample_poisson_lognormal_recurrence(mean_recur: float, sigma: float = 0.5, max_recur: int | None = None) -> int:
+def sample_poisson_lognormal_recurrence(mean_recur: float, sigma: float = 0.5, min_recur: int = 1, max_recur: int | None = None) -> int:
     """
     Sample number of recurrences from Poisson log-normal distribution.
 
@@ -146,14 +146,15 @@ def sample_poisson_lognormal_recurrence(mean_recur: float, sigma: float = 0.5, m
     Args:
         mean_recur: Mean number of recurrences (r̄)
         sigma: Standard deviation of the log-normal component (default: 0.5)
+        min_recur: Minimum recurrence value for clamping (default: 1)
         max_recur: Optional maximum recurrence value for clamping
 
     Returns:
-        Sampled number of recurrences, clamped to [1, max_recur] if max_recur is provided
+        Sampled number of recurrences, clamped to [min_recur, max_recur]
     """
     tau = np.random.normal(math.log(mean_recur) - 0.5 * sigma**2, sigma)
     num_recur = np.random.poisson(math.exp(tau)) + 1
-    num_recur = max(1, min(num_recur, max_recur)) if max_recur is not None else max(1, num_recur)
+    num_recur = max(min_recur, min(num_recur, max_recur)) if max_recur is not None else max(min_recur, num_recur)
     return int(num_recur)
 
 
@@ -161,6 +162,7 @@ def sample_num_recurs_for_step(
     recur_samples_per_step: int | None,
     mean_recur: float,
     sigma: float,
+    min_recur: int,
     max_recur: int | None,
     ddp: bool,
     master_process: bool,
@@ -176,6 +178,7 @@ def sample_num_recurs_for_step(
         recur_samples_per_step: Number of different num_recur values to sample (global across all ranks)
         mean_recur: Mean number of recurrences for sampling
         sigma: Standard deviation for log-normal component
+        min_recur: Minimum recurrence value
         max_recur: Maximum recurrence value
         ddp: Whether DDP is enabled
         master_process: Whether this is the master process (rank 0)
@@ -190,7 +193,7 @@ def sample_num_recurs_for_step(
     # Rank 0 samples all values
     if master_process:
         sampled_num_recurs = [
-            sample_poisson_lognormal_recurrence(mean_recur=mean_recur, sigma=sigma, max_recur=max_recur)
+            sample_poisson_lognormal_recurrence(mean_recur=mean_recur, sigma=sigma, min_recur=min_recur, max_recur=max_recur)
             for _ in range(recur_samples_per_step)
         ]
     else:

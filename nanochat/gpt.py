@@ -57,6 +57,7 @@ class GPTConfig:
 
     # Looped Transformer training options
     train_recur_mean: float = 4.0  # mean recurrences during training (samples from distribution)
+    train_recur_min: int = 2  # min recurrences sampled during training (≥2 required for exit gate gradient flow)
     train_recur_max: int = 16  # max recurrences sampled during training
     bptt_k: int = 4  # truncate backprop to last k recurrences
     # Input injection mode: controls how recurrent state is initialized and injected
@@ -76,6 +77,8 @@ class GPTConfig:
             raise ValueError(f"input_injection must be one of {valid_modes}, got {self.input_injection}")
         if self.exit_min_recur < 1:
             raise ValueError(f"exit_min_recur must be >= 1, got {self.exit_min_recur}")
+        if self.use_exit_gate and self.train_recur_min < 2:
+            raise ValueError(f"train_recur_min must be >= 2 when exit gate is active (last iteration discards lambda_t), got {self.train_recur_min}")
 
 
 def norm(x, eps: float = 1e-6):

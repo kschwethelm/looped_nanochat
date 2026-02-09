@@ -74,6 +74,7 @@ parser.add_argument("--n-prelude", type=int, default=2, help="number of prelude 
 parser.add_argument("--n-recur-block", type=int, default=4, help="number of layers in the recurrent block")
 parser.add_argument("--n-coda", type=int, default=2, help="number of coda layers")
 parser.add_argument("--train-recur-mean", type=float, default=4.0, help="mean recurrences during training (also default r at inference)")
+parser.add_argument("--train-recur-min", type=int, default=2, help="min recurrences sampled during training (>=2 for exit gate gradient flow)")
 parser.add_argument("--train-recur-max", type=int, default=16, help="max recurrences sampled during training")
 parser.add_argument("--bptt-k", type=int, default=4, help="truncate backprop to last k recurrences (limits gradient depth)")
 parser.add_argument(
@@ -91,7 +92,7 @@ parser.add_argument("--exit-min-recur", type=int, default=1, help="minimum recur
 parser.add_argument(
     "--exit-log-stats",
     action=argparse.BooleanOptionalAction,
-    default=True,
+    default=False,
     help="log exit gate stats periodically",
 )
 # Training horizon (only one used, in order of precedence)
@@ -235,6 +236,7 @@ model_config_kwargs = {
     "n_recur_block": args.n_recur_block,
     "n_coda": args.n_coda,
     "train_recur_mean": args.train_recur_mean,
+    "train_recur_min": args.train_recur_min,
     "train_recur_max": args.train_recur_max,
     "bptt_k": args.bptt_k,
     "input_injection": args.input_injection,
@@ -506,6 +508,7 @@ while True:
             num_recur = sample_poisson_lognormal_recurrence(
                 mean_recur=model_config.train_recur_mean,
                 sigma=0.5,
+                min_recur=model_config.train_recur_min,
                 max_recur=model_config.train_recur_max,
             )
         with autocast_ctx:

@@ -35,6 +35,7 @@ def compute_gate_loss(model, idx, targets, num_recur, k, gamma):
     B, T = idx.size()
     if num_recur is None:
         num_recur = int(model.config.train_recur_mean)
+    num_recur = max(num_recur, model.config.train_recur_min)
 
     assert model.cos.size(1) >= T, f"Sequence length grew beyond rotary cache: {T} > {model.cos.size(1)}"
     assert idx.device == model.cos.device, f"Rotary embeddings and idx on different devices: {idx.device} != {model.cos.device}"
@@ -201,6 +202,7 @@ def main():
                 num_recur = sample_poisson_lognormal_recurrence(
                     mean_recur=model.config.train_recur_mean,
                     sigma=0.5,
+                    min_recur=model.config.train_recur_min,
                     max_recur=model.config.train_recur_max,
                 )
             x, y, _state = next(train_loader)

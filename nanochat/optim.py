@@ -368,7 +368,8 @@ class DistMuonAdamW(torch.optim.Optimizer):
         for p in group['params']:
             grad = p.grad
             if grad is None:
-                continue
+                # Zero-fill to participate in collective ops (avoids NCCL desync across ranks)
+                grad = p.grad = torch.zeros_like(p)
             if p.numel() < 1024:
                 # Small params: all_reduce (no scatter/gather needed)
                 future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()

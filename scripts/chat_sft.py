@@ -327,6 +327,7 @@ while True:
         recur_samples_per_step=args.recur_samples_per_step,
         mean_recur=model.config.train_recur_mean,
         sigma=0.5,
+        min_recur=model.config.train_recur_min,
         max_recur=model.config.train_recur_max,
         ddp=ddp,
         master_process=master_process,
