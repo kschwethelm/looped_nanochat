@@ -101,6 +101,8 @@ def print_model_structure(config: GPTConfig) -> None:
     print(model)
     print("=" * 80)
 
+    return model
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Print GPT model structure")
@@ -136,6 +138,16 @@ if __name__ == "__main__":
         default=4,
         help="Truncate backprop to last k recurrences (limits gradient depth)",
     )
+    # Training horizon (same as base_train.py)
+    parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
+    parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
+    parser.add_argument(
+        "--target-param-data-ratio",
+        type=int,
+        default=7,
+        help="calculate num_iterations to maintain data:param ratio (accounts for parameter reuse + slight overtrain), -1 = disable)",
+    )
+    parser.add_argument("--total-batch-size", type=int, default=524288, help="total batch size in tokens")
     args = parser.parse_args()
 
     # Tokenizer (for vocab size)
@@ -177,4 +189,37 @@ if __name__ == "__main__":
     )
 
     # Print structure
-    print_model_structure(config)
+    model = print_model_structure(config)
+
+    # Training horizon calculations (mirrors base_train.py logic)
+    num_flops_per_token = model.estimate_flops()
+    num_scaling_params = model.effective_params(num_recur=int(config.train_recur_mean))
+
+    if args.num_iterations > 0:
+        num_iterations = args.num_iterations
+        source = "explicit"
+    elif args.target_flops > 0:
+        num_iterations = round(args.target_flops / (num_flops_per_token * args.total_batch_size))
+        source = f"target_flops={args.target_flops:e}"
+    elif args.target_param_data_ratio > 0:
+        target_tokens = args.target_param_data_ratio * num_scaling_params
+        num_iterations = int(target_tokens // args.total_batch_size)
+        source = f"target_param_data_ratio={args.target_param_data_ratio}"
+    else:
+        num_iterations = None
+        source = None
+
+    if num_iterations is not None:
+        total_tokens = args.total_batch_size * num_iterations
+        param_data_ratio = total_tokens / num_scaling_params
+        total_flops = num_flops_per_token * total_tokens
+
+        print("=" * 80)
+        print(f"Training Horizon ({source})")
+        print("=" * 80)
+        print(f"  Total batch size:      {args.total_batch_size:,}")
+        print(f"  Num iterations:        {num_iterations:,}")
+        print(f"  Total tokens:          {total_tokens:,}")
+        print(f"  Total FLOPs:           {total_flops:e}")
+        print(f"  Tokens:Params ratio:   {param_data_ratio:.2f}")
+        print("=" * 80)

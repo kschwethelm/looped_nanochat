@@ -3,12 +3,6 @@
 # Evaluate a trained model sweeping over different numbers of loop iterations (num_recur).
 # This script demonstrates test-time compute scaling by varying the recurrence depth.
 #
-# Usage:
-#   bash slurm/base_eval_recur_sweep.sh [model_tag] [step]
-#
-# Examples:
-#   bash slurm/base_eval_recur_sweep.sh d24          # Evaluate latest checkpoint of d24
-#   bash slurm/base_eval_recur_sweep.sh d24 5000     # Evaluate step 5000 of d24
 
 set -e  # Exit on error
 
@@ -25,9 +19,9 @@ NPROC_PER_NODE=${SLURM_GPUS:-1}
 # Parse arguments
 # Model tags to evaluate:
 MODEL_TAGS=(
-    #"r4_2.15e18_s12"                      # not sampled
-    #"r4_sample_2.15e18_s12"               # bs16 sampled
-    #"r4_sample_init_random_2.15e18_s12"   # bs16 sampled with random init
+    "r4_2.15e18_s12"                      # not sampled
+    "r4_sample_2.15e18_s12"               # bs16 sampled
+    "r4_sample_init_random_2.15e18_s12"   # bs16 sampled with random init
     "r4_init_random_2.15e18_s12"          # not sampled with random init
 )
 
@@ -49,7 +43,7 @@ DEVICE_BATCH_SIZE=16
 
 # Recurrence values to sweep over
 # Typical values: 1 (no recurrence), 2, 4 (training default), 8, 16, 32 (more test-time compute)
-RECUR_VALUES=(16 32)
+RECUR_VALUES=(2 4 8 16 32)
 
 echo "=========================================="
 echo "Recurrence Sweep Evaluation"

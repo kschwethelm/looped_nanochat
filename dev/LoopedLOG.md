@@ -6,6 +6,74 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
+## 2026-02-09: Recurrence Sampling & Random State Init — Negative Result (6c5710a)
+
+Tested whether training with (a) sampled recurrence steps and (b) random initial recurrent state enables adaptive test-time compute. S12 model (768 width, ~158M params, r=4 mean), 2.15e18 token budget. SFT with recurrence sampling applied to all variants regardless of base training.
+
+**Motivation.** Two training-time interventions aimed at enabling adaptive compute at inference:
+
+1. **Recurrence step sampling** (`sample`): Sample num_recur from a Poisson lognormal distribution (1–16, mean 4) instead of fixed r=4. Goal: teach the model to benefit from variable compute budgets, enabling "think more on harder tokens." -> Source: Huginn (Geiping et al., 2025)
+2. **Random initial state** (`init_random`): Initialize the recurrent latent state with noise instead of the prelude's output. Goal: force convergence from diverse starting points, making the state representation more robust. -> Source: Huginn (Geiping et al., 2025)
+
+Training cost: Step sampling requires `torch.compile(dynamic=True)`, increasing base training time by ~30% (2:56h vs 2:14h on 2x A100 80GB).
+
+**Four variants tested:** `r4` (baseline, fixed steps, prelude init), `r4_init_random`, `r4_sample`, `r4_sample_init_random`.
+
+### Base Model — Validation BPB vs Recurrence Depth
+
+| Model | r=2 | r=4 | r=8 | r=16 | r=32 |
+|-------|-----|-----|-----|------|------|
+| r4 (baseline) | 0.9943 | **0.9144** | 0.9215 | 0.9247 | 0.9247 |
+| r4_init_random | 1.0197 | 0.9258 | 0.9263 | 0.9263 | 0.9264 |
+| r4_sample | 0.9263 | 0.9174 | 0.9177 | 0.9177 | 0.9177 |
+| r4_sample_init_random | 0.9277 | 0.9178 | 0.9184 | 0.9184 | 0.9184 |
+
+Key observations from base eval:
+
+- **No model benefits from more recurrences beyond r=4.** All variants plateau. Notably, the baseline `r4` trained at fixed r=4 shows only mild degradation at much higher depths (0.9144 → 0.9247 at r=32) — more stable than expected when evaluated far outside its training distribution. Sampling variants stay flat but don't improve either.
+- **Sampling variants are more robust at low r.** At r=2, `r4_sample` (0.9263) is dramatically better than `r4` (0.9943). The model learned to produce useful output even with fewer iterations. However, this robustness comes at the cost of slightly worse performance at the training mean (0.9174 vs 0.9144).
+- **Random init is redundant or slightly harmful.** `r4_init_random` is the weakest variant, and combining it with sampling (`r4_sample_init_random` ≈ `r4_sample`) shows no added benefit. The differences are small, but random init never helps — at best it's neutral when sampling already provides robustness.
+
+### SFT Model — ChatCORE vs Recurrence Depth
+
+All base models were SFT'd with recurrence sampling enabled (including variants not trained with it). Evaluated with KV budget=1, warm start.
+
+| Model | r=2 | r=4 | r=8 | r=16 | r=32 |
+|-------|-----|-----|-----|------|------|
+| r4 (baseline) | 0.2094 | 0.2187 | 0.2218 | 0.2197 | 0.2197 |
+| r4_init_random | 0.2054 | 0.2186 | 0.2208 | 0.2214 | 0.2208 |
+| r4_sample | 0.2010 | 0.2196 | 0.2200 | 0.2205 | 0.2199 |
+| r4_sample_init_random | 0.2054 | 0.2186 | 0.2208 | 0.2214 | 0.2208 |
+
+Key observations after SFT:
+
+- **SFT largely equalizes all variants.** All variants converge to similar ChatCORE across all recurrence depths. The base training differences wash out. This means SFT alone is sufficient — the 30% training overhead from `dynamic=True` in base training buys nothing in the final chat model.
+- **Flat curves beyond r=4 everywhere.** The central finding holds post-SFT: extra recurrences don't improve downstream performance.
+
+### Interpretation
+
+The recurrent block seems to converge to a near-fixed point after ~4 iterations — additional iterations are close to identity. One possible explanation is that nothing in training incentivizes using extra steps: the loss treats all step counts equally, so a model that converges at r=4 and idles beyond that is never penalized. Sampling exposes the model to variable depths but doesn't teach it *when* to use them.
+
+Random init doesn't help either. The initial recurrent state is formed by concatenating a second signal with the prelude output and projecting through a linear adapter. Without random init, the prelude output is simply duplicated for this — replacing the duplicate with noise adds no useful diversity.
+
+**Caveat:** These are small models (~158M params) with a low loop count (r=4). Whether this generalizes to more powerful models is an open question. The s20 model (~328M params, trained longer without recurrence sampling) shows the same flat behavior at test time, which is at least consistent. Note that r=4 is also the default in other looped transformer work (Ouro, Mixture-of-Recursions), so we're not obviously under-looping — but the interaction between model capacity, loop count, and adaptive compute could look very different at larger scale.
+
+### Decisions (for now)
+
+- **Skip recurrence sampling in base training.** The 30% compute overhead from `dynamic=True` yields no benefit after SFT. SFT with sampling is enough for robustness.
+- **Skip random initial state.** Redundant at best, slightly harmful at worst.
+- **Fixed r=4 base training remains the default.** Simple, fast, and SFT recovers any robustness gap.
+
+### Next steps
+
+The models are robust (don't diverge with more recurrences) but flat (don't improve). Ideas to explore for actual test-time compute scaling:
+
+1. **Token-level gating.** A learned gate that decides per-token whether to iterate more — the missing training signal linking extra compute to harder tokens.
+2. **Introduce gating only in SFT.** Since SFT recovers base train differences, gating might not need to be in base training at all.
+3. **Loss weighting by depth.** Weight the loss to reward predictions that improve with more recurrences.
+
+---
+
 ## 2026-02-08: Hyperparameter Tuning (d79bc25)
 
 Swept hyperparameters at S12 (768 width, ~158M params, ratio=4, fixed r=4) to check whether the looped architecture needs different settings from the non-looped defaults.

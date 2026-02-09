@@ -125,7 +125,7 @@ def create_short_label(model_tag: str) -> str:
     return label
 
 
-def plot_chatcore_vs_recur(data: dict, output_path: Path):
+def plot_chatcore_vs_recur(data: dict, output_path: Path, y_min: float | None = None, y_max: float | None = None):
     """Create plot of ChatCORE vs num_recur for each model."""
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -176,6 +176,8 @@ def plot_chatcore_vs_recur(data: dict, output_path: Path):
             all_recur_vals.update(data[model_tag].keys())
         ax.set_xticks(sorted(all_recur_vals))
 
+    if y_min is not None or y_max is not None:
+        ax.set_ylim(bottom=y_min, top=y_max)
 
     plt.tight_layout()
 
@@ -194,6 +196,8 @@ def main():
     parser = argparse.ArgumentParser(description="Plot ChatCORE vs number of recurrences")
     parser.add_argument("--model-tags", nargs="+", default=None, help="Filter by specific model tags")
     parser.add_argument("--output", type=str, default=None, help="Output path (default: plots/chatcore_vs_recur.png)")
+    parser.add_argument("--y-min", type=float, default=None, help="Minimum y-axis value")
+    parser.add_argument("--y-max", type=float, default=None, help="Maximum y-axis value")
     args = parser.parse_args()
 
     # Get base directory
@@ -227,7 +231,7 @@ def main():
     # Create plot
     output_path = Path(args.output) if args.output else (base_dir / "plots" / "chatcore_vs_recur.png")
     print(f"\nCreating plot...")
-    plot_chatcore_vs_recur(data, output_path)
+    plot_chatcore_vs_recur(data, output_path, y_min=args.y_min, y_max=args.y_max)
 
 
 if __name__ == "__main__":
