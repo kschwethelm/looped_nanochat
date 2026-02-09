@@ -190,6 +190,9 @@ def main():
     parser.add_argument("--split-tokens", type=int, default=40 * 524288, help="Number of tokens to evaluate per split for BPB")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
     parser.add_argument("--num-recur", type=int, default=None, help="Number of recurrent iterations (default = model's train_recur_mean)")
+    parser.add_argument("--adaptive-exit-q", type=float, default=None, help="Q-exit threshold for adaptive inference")
+    parser.add_argument("--adaptive-exit-max-recur", type=int, default=None, help="Maximum recurrences for adaptive inference")
+    parser.add_argument("--adaptive-exit-min-recur", type=int, default=None, help="Minimum recurrences before adaptive exit can stop")
     args = parser.parse_args()
 
     # Parse evaluation modes
@@ -308,7 +311,16 @@ def main():
             for prompt in prompts:
                 tokens = tokenizer(prompt, prepend="<|bos|>")
                 with autocast_ctx:
-                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0, num_recur=args.num_recur)
+                    sample, _ = engine.generate_batch(
+                        tokens,
+                        num_samples=1,
+                        max_tokens=16,
+                        temperature=0,
+                        num_recur=args.num_recur,
+                        adaptive_exit_q=args.adaptive_exit_q,
+                        adaptive_exit_max_recur=args.adaptive_exit_max_recur,
+                        adaptive_exit_min_recur=args.adaptive_exit_min_recur,
+                    )
                 sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
@@ -317,7 +329,16 @@ def main():
             print0("\nUnconditioned samples:")
             tokens = tokenizer("", prepend="<|bos|>")
             with autocast_ctx:
-                uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0, num_recur=args.num_recur)
+                uncond, _ = engine.generate_batch(
+                    tokens,
+                    num_samples=8,
+                    max_tokens=128,
+                    temperature=1.0,
+                    num_recur=args.num_recur,
+                    adaptive_exit_q=args.adaptive_exit_q,
+                    adaptive_exit_max_recur=args.adaptive_exit_max_recur,
+                    adaptive_exit_min_recur=args.adaptive_exit_min_recur,
+                )
             for sample in uncond:
                 sample_str = tokenizer.decode(sample)
                 print0("-" * 80)

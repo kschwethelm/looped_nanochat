@@ -290,6 +290,7 @@ for step in range(num_steps):
         current_step_num_recur = sample_poisson_lognormal_recurrence(
             mean_recur=model.config.train_recur_mean,
             sigma=0.5,
+            min_recur=model.config.train_recur_min,
             max_recur=model.config.train_recur_max,
         )
 

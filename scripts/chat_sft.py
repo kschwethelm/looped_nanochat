@@ -33,6 +33,7 @@ from nanochat.common import (
     print0,
     sample_num_recurs_for_step,
 )
+from nanochat.dataloader import sft_data_loader
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.tokenizer import get_token_bytes
 from tasks.common import TaskMixture
@@ -76,6 +77,22 @@ parser.add_argument(
     default=8,
     help="Number of different num_recur values per gradient accumulation step (None = fixed, use model default)",
 )
+parser.add_argument(
+    "--recur-mean",
+    type=float,
+    default=None,
+    help="Override train_recur_mean for recurrence sampling (default: use model config value)",
+)
+parser.add_argument(
+    "--recur-max",
+    type=int,
+    default=None,
+    help="Override train_recur_max for recurrence sampling (default: use model config value)",
+)
+# Exit gate (Ouro-style learned depth allocation) — overrides checkpoint config when set
+parser.add_argument("--exit-beta", type=float, default=None, help="entropy regularization weight for exit gate (None = keep checkpoint value)")
+parser.add_argument("--exit-min-recur", type=int, default=None, help="minimum recurrences before exit gate can stop (None = keep checkpoint value)")
+parser.add_argument("--exit-log-stats", action=argparse.BooleanOptionalAction, default=False, help="log exit gate stats periodically")
 # Output
 parser.add_argument("--dry-run", action="store_true", help="log to wandb but skip checkpoints/report")
 # Gradient tracking
@@ -111,6 +128,19 @@ if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_s
         f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?"
     )
 orig_model = model
+if args.recur_mean is not None:
+    print0(f"Overriding train_recur_mean: {model.config.train_recur_mean} -> {args.recur_mean}")
+    model.config.train_recur_mean = args.recur_mean
+if args.recur_max is not None:
+    print0(f"Overriding train_recur_max: {model.config.train_recur_max} -> {args.recur_max}")
+    model.config.train_recur_max = args.recur_max
+# Override exit gate config from CLI args (None = keep checkpoint value)
+for attr in ("exit_beta", "exit_min_recur"):
+    cli_val = getattr(args, attr)
+    if cli_val is not None:
+        old_val = getattr(model.config, attr)
+        setattr(model.config, attr, cli_val)
+        print0(f"Overriding model config {attr}: {old_val} -> {cli_val}")
 # Use dynamic=False when recur sampling is enabled (varying num_recur causes recompilation otherwise)
 model = torch.compile(model, dynamic=bool(args.recur_samples_per_step))
 size = model.config.size
@@ -183,117 +213,36 @@ approx_progress = 0.0  # will go from 0 to 1 over the course of the epoch
 current_epoch = 1  # track epoch for logging
 
 
-def sft_data_generator_bos_bestfit(split, buffer_size=100):
-    """
-    BOS-aligned dataloader for SFT with bestfit-pad packing.
-
-    Each row in the batch starts with BOS (beginning of a conversation).
-    Conversations are packed using best-fit algorithm. When no conversation fits,
-    the row is padded (instead of cropping) to ensure no tokens are ever discarded.
-    Padding positions have targets masked with -1 (ignore_index for cross-entropy).
-    """
+def _tracked_sft_loader(split):
+    """Wrap sft_data_loader with progress/epoch tracking for the training loop."""
     global last_step, approx_progress, current_epoch
     assert split in {"train", "val"}, "split must be 'train' or 'val'"
     dataset = train_dataset if split == "train" else val_dataset
-    dataset_size = len(dataset)
-    assert dataset_size > 0
-    row_capacity = args.max_seq_len + 1  # +1 for target at last position
-    bos_token = tokenizer.get_bos_token_id()
-
-    # Conversation buffer: list of token lists
-    conv_buffer = []
-    cursor = ddp_rank  # Each rank processes different conversations (for fetching)
-    consumed = ddp_rank  # Track actual consumption separately from buffering
-    epoch = 1
-    it = 0  # iteration counter
-
-    def refill_buffer():
-        nonlocal cursor, epoch
-        while len(conv_buffer) < buffer_size:
-            conversation = dataset[cursor]
-            ids, _ = tokenizer.render_conversation(conversation)
-            conv_buffer.append(ids)
-            cursor += ddp_world_size
-            if cursor >= dataset_size:
-                cursor = cursor % dataset_size
-                epoch += 1
-                # Note: last_step is now triggered based on consumption, not fetching
-
-    while True:
-        rows = []
-        row_lengths = []  # Track actual content length (excluding padding) for each row
-        for _ in range(args.device_batch_size):
-            row = []
-            padded = False
-            while len(row) < row_capacity:
-                # Ensure buffer has conversations
-                while len(conv_buffer) < buffer_size:
-                    refill_buffer()
-
-                remaining = row_capacity - len(row)
-
-                # Find largest conversation that fits entirely
-                best_idx = -1
-                best_len = 0
-                for i, conv in enumerate(conv_buffer):
-                    conv_len = len(conv)
-                    if conv_len <= remaining and conv_len > best_len:
-                        best_idx = i
-                        best_len = conv_len
-
-                if best_idx >= 0:
-                    # Found a conversation that fits - use it entirely
-                    conv = conv_buffer.pop(best_idx)
-                    row.extend(conv)
-                    consumed += ddp_world_size  # Track actual consumption
-                else:
-                    # No conversation fits - pad the remainder instead of cropping
-                    # This ensures we never discard any tokens
-                    content_len = len(row)
-                    row.extend([bos_token] * remaining)  # Pad with BOS tokens
-                    padded = True
-                    break  # Row is now full (with padding)
-
-            # Track content length: full row if no padding, otherwise the length before padding
-            if padded:
-                row_lengths.append(content_len)
-            else:
-                row_lengths.append(row_capacity)
-            rows.append(row[:row_capacity])
-
-        # Stopping condition to respect num_iterations, if given
-        it += 1
-        if 0 < args.num_iterations <= it and split == "train":
-            last_step = True
-
-        # Update progress tracking (based on consumed, not cursor, to account for buffering)
+    loader = sft_data_loader(
+        tokenizer, dataset,
+        B=args.device_batch_size, T=args.max_seq_len,
+        device=device, device_type=device_type,
+        ddp_rank=ddp_rank, ddp_world_size=ddp_world_size,
+    )
+    it = 0
+    for inputs, targets, meta in loader:
         if split == "train":
-            current_epoch = epoch
+            it += 1
+            consumed, dataset_size = meta["consumed"], meta["dataset_size"]
+            current_epoch = consumed // dataset_size + 1
             if args.num_iterations > 0:
                 approx_progress = it / args.num_iterations
+                if it >= args.num_iterations:
+                    last_step = True
             else:
                 approx_progress = consumed / dataset_size
-            # Trigger last_step when we've consumed enough (instead of when cursor wraps)
-            if consumed >= dataset_size:
-                last_step = True
-
-        # Build tensors
-        use_cuda = device_type == "cuda"
-        batch_tensor = torch.tensor(rows, dtype=torch.long, pin_memory=use_cuda)
-        inputs = batch_tensor[:, :-1].to(device=device, dtype=torch.int32, non_blocking=use_cuda)
-        targets = batch_tensor[:, 1:].to(device=device, dtype=torch.int64, non_blocking=use_cuda)
-
-        # Mask out padding positions in targets (set to -1 = ignore_index)
-        # For each row, positions >= (content_length - 1) in targets should be masked
-        for i, content_len in enumerate(row_lengths):
-            if content_len < row_capacity:
-                targets[i, content_len - 1 :] = -1
-
+                if consumed >= dataset_size:
+                    last_step = True
         yield inputs, targets
 
 
-train_loader = sft_data_generator_bos_bestfit("train")
-build_val_loader = lambda: sft_data_generator_bos_bestfit("val")
+train_loader = _tracked_sft_loader("train")
+build_val_loader = lambda: _tracked_sft_loader("val")
 progress = 0  # will go from 0 to 1 over the course of the epoch
 
 
@@ -378,6 +327,7 @@ while True:
         recur_samples_per_step=args.recur_samples_per_step,
         mean_recur=model.config.train_recur_mean,
         sigma=0.5,
+        min_recur=model.config.train_recur_min,
         max_recur=model.config.train_recur_max,
         ddp=ddp,
         master_process=master_process,
@@ -454,8 +404,7 @@ while True:
         f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | num_recur: {logged_num_recur_str} | total time: {total_training_time / 60:.2f}m"
     )
     if step % 10 == 0:
-        wandb_run.log(
-            {
+        log_data = {
                 "step": step,
                 "total_training_flops": flops_so_far,
                 "total_training_time": total_training_time,
@@ -471,8 +420,21 @@ while True:
                 "lr/embed": effective_lr_embed,     # effective learning rate for embeddings
                 "lr/unembed": effective_lr_unembed, # effective learning rate for unembedding (lm_head)
                 **{f"model_health/{k}": v for k, v in model_health_stats.items()},  # Add model health stats
-            }
-        )
+        }
+        if orig_model.config.use_exit_gate and args.exit_log_stats:
+            stats_batch = min(2, x.size(0))
+            stats_x = x[:stats_batch]
+            stats_y = y[:stats_batch]
+            with torch.no_grad(), autocast_ctx:
+                gate_stats = orig_model.compute_exit_stats(stats_x, targets=stats_y, num_recur=int(logged_num_recur))
+            log_data.update(
+                {
+                    "gate/entropy": gate_stats["entropy"].item(),
+                    "gate/expected_t": gate_stats["expected_t"].item(),
+                    "gate/p_last": gate_stats["p_last"].item(),
+                }
+            )
+        wandb_run.log(log_data)
 
 # print a few more stats
 print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")

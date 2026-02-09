@@ -231,6 +231,9 @@ class Engine:
         num_recur=None,
         use_warm_start=False,
         kv_budget: int = 1,
+        adaptive_exit_q: float | None = None,
+        adaptive_exit_max_recur: int | None = None,
+        adaptive_exit_min_recur: int | None = None,
     ):
         """
         Generate tokens with KV caching and optional batch sampling.
@@ -240,6 +243,9 @@ class Engine:
                 At iteration i, reads/writes cache entry i mod kv_budget.
                 Budget=1 caches only final recurrence (memory efficient).
                 Budget=num_recur caches all recurrences (allows attention across all loop states).
+            adaptive_exit_q: If set, use Q-exit adaptive inference (learned exit gate).
+            adaptive_exit_max_recur: Hard cap on recurrences during adaptive exit.
+            adaptive_exit_min_recur: Minimum recurrences before adaptive exit can stop.
         """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         assert kv_budget >= 1, f"kv_budget must be >= 1, got {kv_budget}"
@@ -262,10 +268,17 @@ class Engine:
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")  # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id()  # if sampled, ends row
 
+        use_adaptive_exit = adaptive_exit_q is not None
+        if use_adaptive_exit and not self.model.config.use_exit_gate:
+            raise ValueError("adaptive_exit_q requires a model with use_exit_gate=True")
+
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
         # Determine number of recurrences for cache allocation
-        cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
+        if use_adaptive_exit:
+            cache_num_recur = adaptive_exit_max_recur if adaptive_exit_max_recur is not None else int(m.train_recur_max)
+        else:
+            cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
         # Calculate effective number of layers based on KV budget
         # Budget determines how many recurrence iterations we cache: prelude + (recur_block * kv_budget) + coda
         effective_num_layers = m.n_prelude + (m.n_recur_block * kv_budget) + m.n_coda
@@ -284,7 +297,17 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
+        if use_adaptive_exit:
+            logits, warm_start_state = self.model.forward_adaptive_exit(
+                ids,
+                kv_cache=kv_cache_prefill,
+                warm_start_state=None,
+                exit_q=adaptive_exit_q,
+                exit_max_recur=adaptive_exit_max_recur,
+                exit_min_recur=adaptive_exit_min_recur,
+            )
+        else:
+            logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
         warm_start_state = warm_start_state[:, -1:, :].expand(num_samples, -1, -1)  # (num_samples, 1, hidden_dim)
 
@@ -357,12 +380,22 @@ class Engine:
 
             # Prepare logits for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-            logits, warm_start_state = self.model.forward(
-                ids,
-                kv_cache=kv_cache_decode,
-                num_recur=num_recur,
-                warm_start_state=warm_start_state if use_warm_start else None,
-            )
+            if use_adaptive_exit:
+                logits, warm_start_state = self.model.forward_adaptive_exit(
+                    ids,
+                    kv_cache=kv_cache_decode,
+                    warm_start_state=warm_start_state if use_warm_start else None,
+                    exit_q=adaptive_exit_q,
+                    exit_max_recur=adaptive_exit_max_recur,
+                    exit_min_recur=adaptive_exit_min_recur,
+                )
+            else:
+                logits, warm_start_state = self.model.forward(
+                    ids,
+                    kv_cache=kv_cache_decode,
+                    num_recur=num_recur,
+                    warm_start_state=warm_start_state if use_warm_start else None,
+                )
             logits = logits[:, -1, :]  # (B, vocab_size)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):

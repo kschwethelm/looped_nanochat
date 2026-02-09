@@ -74,6 +74,7 @@ parser.add_argument("--n-prelude", type=int, default=2, help="number of prelude 
 parser.add_argument("--n-recur-block", type=int, default=4, help="number of layers in the recurrent block")
 parser.add_argument("--n-coda", type=int, default=2, help="number of coda layers")
 parser.add_argument("--train-recur-mean", type=float, default=4.0, help="mean recurrences during training (also default r at inference)")
+parser.add_argument("--train-recur-min", type=int, default=2, help="min recurrences sampled during training (>=2 for exit gate gradient flow)")
 parser.add_argument("--train-recur-max", type=int, default=16, help="max recurrences sampled during training")
 parser.add_argument("--bptt-k", type=int, default=4, help="truncate backprop to last k recurrences (limits gradient depth)")
 parser.add_argument(
@@ -84,6 +85,16 @@ parser.add_argument(
     help="input injection mode: inject_init_prelude (default), inject_init_random, or passthrough (no injection)",
 )
 parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use fixed train_recur_mean instead")
+# Exit gate (Ouro-style learned depth allocation)
+parser.add_argument("--use-exit-gate", action="store_true", help="enable learned exit gate and entropy-regularized objective")
+parser.add_argument("--exit-beta", type=float, default=0.05, help="entropy regularization weight for exit gate")
+parser.add_argument("--exit-min-recur", type=int, default=1, help="minimum recurrences before the exit gate can stop")
+parser.add_argument(
+    "--exit-log-stats",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="log exit gate stats periodically",
+)
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -225,9 +236,13 @@ model_config_kwargs = {
     "n_recur_block": args.n_recur_block,
     "n_coda": args.n_coda,
     "train_recur_mean": args.train_recur_mean,
+    "train_recur_min": args.train_recur_min,
     "train_recur_max": args.train_recur_max,
     "bptt_k": args.bptt_k,
     "input_injection": args.input_injection,
+    "use_exit_gate": args.use_exit_gate,
+    "exit_beta": args.exit_beta,
+    "exit_min_recur": args.exit_min_recur,
 }
 with torch.device("meta"):
     # All tensors are created as meta tensors (they have shape/dtype but no data)
@@ -493,6 +508,7 @@ while True:
             num_recur = sample_poisson_lognormal_recurrence(
                 mean_recur=model_config.train_recur_mean,
                 sigma=0.5,
+                min_recur=model_config.train_recur_min,
                 max_recur=model_config.train_recur_max,
             )
         with autocast_ctx:
@@ -572,6 +588,19 @@ while True:
             "muon/weight_decay": muon_weight_decay, # Muon weight decay schedule value
             **{f"model_health/{k}": v for k, v in model_health_stats.items()},  # Add model health stats
         }
+        if orig_model.config.use_exit_gate and args.exit_log_stats:
+            stats_batch = min(2, x.size(0))
+            stats_x = x[:stats_batch]
+            stats_y = y[:stats_batch]
+            with torch.no_grad(), autocast_ctx:
+                gate_stats = orig_model.compute_exit_stats(stats_x, targets=stats_y, num_recur=logged_num_recur)
+            log_data.update(
+                {
+                    "gate/entropy": gate_stats["entropy"].item(),
+                    "gate/expected_t": gate_stats["expected_t"].item(),
+                    "gate/p_last": gate_stats["p_last"].item(),
+                }
+            )
         wandb_run.log(log_data)
 
     # state update

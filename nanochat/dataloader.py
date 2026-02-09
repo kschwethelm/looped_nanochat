@@ -163,3 +163,73 @@ def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
         yield inputs, targets
+
+
+def sft_data_loader(
+    tokenizer,
+    dataset,
+    B: int,
+    T: int,
+    device,
+    device_type: str,
+    ddp_rank: int,
+    ddp_world_size: int,
+    buffer_size: int = 100,
+):
+    """
+    SFT conversation data loader with bestfit-pad packing.
+
+    Each row starts with BOS. Conversations are packed using best-fit algorithm.
+    When no conversation fits, the row is padded with BOS tokens.
+    Padding positions have targets masked with -1 (ignore_index for cross-entropy).
+
+    Yields (inputs, targets, metadata) where metadata contains:
+        - consumed: total conversations consumed (across all ranks)
+    """
+    dataset_size = len(dataset)
+    assert dataset_size > 0
+    row_capacity = T + 1  # +1 for target at last position
+    bos_token = tokenizer.get_bos_token_id()
+    conv_buffer: list[list[int]] = []
+    cursor = ddp_rank
+    consumed = ddp_rank
+
+    def refill():
+        nonlocal cursor
+        while len(conv_buffer) < buffer_size:
+            ids, _ = tokenizer.render_conversation(dataset[cursor % dataset_size])
+            conv_buffer.append(ids)
+            cursor += ddp_world_size
+
+    while True:
+        rows = []
+        row_lengths = []
+        for _ in range(B):
+            row: list[int] = []
+            padded = False
+            while len(row) < row_capacity:
+                refill()
+                remaining = row_capacity - len(row)
+                best_idx, best_len = -1, 0
+                for i, conv in enumerate(conv_buffer):
+                    if len(conv) <= remaining and len(conv) > best_len:
+                        best_idx, best_len = i, len(conv)
+                if best_idx >= 0:
+                    row.extend(conv_buffer.pop(best_idx))
+                    consumed += ddp_world_size
+                else:
+                    content_len = len(row)
+                    row.extend([bos_token] * remaining)
+                    padded = True
+                    break
+            row_lengths.append(content_len if padded else row_capacity)
+            rows.append(row[:row_capacity])
+
+        use_cuda = device_type == "cuda"
+        batch = torch.tensor(rows, dtype=torch.long, pin_memory=use_cuda)
+        x = batch[:, :-1].to(device=device, dtype=torch.int32, non_blocking=use_cuda)
+        y = batch[:, 1:].to(device=device, dtype=torch.int64, non_blocking=use_cuda)
+        for i, cl in enumerate(row_lengths):
+            if cl < row_capacity:
+                y[i, cl - 1 :] = -1
+        yield x, y, {"consumed": consumed, "dataset_size": dataset_size}
