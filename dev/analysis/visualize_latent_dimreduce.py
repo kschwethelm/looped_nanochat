@@ -1,15 +1,29 @@
 """
-t-SNE visualization of latent states across multiple GSM8K samples.
+Dimensionality reduction visualization of latent states across multiple GSM8K samples.
 
 This script:
 1. Loads multiple GSM8K test cases
 2. Generates responses using the looped transformer
 3. Captures the recurrent state after each loop iteration for all tokens (input + output)
-4. Projects the high-dimensional latent states into 2D via t-SNE
+4. Projects the high-dimensional latent states into 2D via PCA, t-SNE, UMAP, or PHATE
 5. Plots the 2D embeddings colored by loop step and shaped by token type (input vs output)
 
+Methods:
+    pca   - Linear projection onto top-2 principal components. Fast, deterministic baseline.
+            Shows whether loop-step separation lives in a linear subspace. Reports explained variance.
+    tsne  - Nonlinear, preserves local neighborhood structure. Good at revealing clusters but
+            distorts global distances. Sensitive to perplexity; slow on large point counts.
+    umap  - Nonlinear, preserves both local and more global structure than t-SNE. Faster,
+            scales better, and tends to produce more connected embeddings.
+    phate - Diffusion-based, specifically designed for trajectory/progression data. Captures
+            both local and global manifold structure via diffusion distances. Best suited for
+            visualizing the loop-step evolution as a continuous path.
+
 Example:
-    uv run python dev/analysis/visualize_latent_tsne.py -i sft --num-recur 16 --num-samples 5
+    uv run python dev/analysis/visualize_latent_dimreduce.py -i sft --num-recur 16 --num-samples 5
+    uv run python dev/analysis/visualize_latent_dimreduce.py -i sft --num-recur 16 --num-samples 5 --method umap
+    uv run python dev/analysis/visualize_latent_dimreduce.py -i sft --num-recur 16 --num-samples 5 --method phate
+    uv run python dev/analysis/visualize_latent_dimreduce.py -i sft --num-recur 16 --num-samples 5 --method pca
 """
 
 import argparse
@@ -19,7 +33,10 @@ from pathlib import Path
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
+import phate
 import torch
+import umap
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 from dev.analysis.common import generate_with_latent_tracking
@@ -150,7 +167,7 @@ def stratified_subsample(
     return vectors[selected], loop_steps[selected], token_types[selected], sample_ids[selected]
 
 
-def plot_tsne(
+def plot_embedding(
     embedding: np.ndarray,
     loop_steps: np.ndarray,
     token_types: np.ndarray,
@@ -161,9 +178,10 @@ def plot_tsne(
     alpha: float,
     kv_budget: int,
     use_warm_start: bool,
-    perplexity: float,
+    method: str,
+    method_params: str,
 ):
-    """Plot t-SNE embedding colored by loop step and shaped by token type."""
+    """Plot 2D embedding colored by loop step and shaped by token type."""
     fig, ax = plt.subplots(figsize=(12, 10))
 
     cmap = plt.get_cmap("viridis", num_recur)
@@ -181,7 +199,7 @@ def plot_tsne(
             mask = step_mask & type_mask
             if not mask.any():
                 continue
-            sc = ax.scatter(
+            ax.scatter(
                 embedding[mask, 0],
                 embedding[mask, 1],
                 c=[cmap(step / (num_recur - 1))] * mask.sum(),
@@ -207,41 +225,56 @@ def plot_tsne(
             )
     ax.legend(handles=legend_handles, loc="upper right", fontsize=10)
 
+    method_upper = method.upper()
     warmstart_text = ", warm-start" if use_warm_start else ""
     ax.set_title(
-        f"t-SNE of Latent States ({source} model)\n"
-        f"num_recur={num_recur}, {num_samples} samples, kv_budget={kv_budget}, perplexity={perplexity}{warmstart_text}",
+        f"{method_upper} of Latent States ({source} model)\n"
+        f"num_recur={num_recur}, {num_samples} samples, kv_budget={kv_budget}, {method_params}{warmstart_text}",
         fontsize=13,
     )
-    ax.set_xlabel("t-SNE dim 1", fontsize=11)
-    ax.set_ylabel("t-SNE dim 2", fontsize=11)
+    if method == "pca":
+        ax.set_xlabel("PC 1", fontsize=11)
+        ax.set_ylabel("PC 2", fontsize=11)
+    else:
+        ax.set_xlabel(f"{method_upper} dim 1", fontsize=11)
+        ax.set_ylabel(f"{method_upper} dim 2", fontsize=11)
     ax.grid(True, alpha=0.2)
 
     # Save
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
     warmstart_suffix = "_warmstart" if use_warm_start else ""
-    output_path = plots_dir / f"gsm8k_latent_tsne_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
+    output_path = plots_dir / f"gsm8k_latent_{method}_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"\nt-SNE plot saved to: {output_path}")
+    print(f"\n{method_upper} plot saved to: {output_path}")
     plt.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="t-SNE visualization of latent states across GSM8K samples")
+    parser = argparse.ArgumentParser(description="t-SNE / UMAP visualization of latent states across GSM8K samples")
     parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: base|sft|rl (default: sft)")
     parser.add_argument("--model-tag", type=str, default=None, help="Model tag (e.g., d12). If not specified, uses largest model.")
     parser.add_argument("--sample-idx", type=int, default=0, help="GSM8K sample index to start from (default: 0)")
     parser.add_argument("--num-samples", type=int, default=5, help="Number of samples (default: 5)")
     parser.add_argument("--num-recur", type=int, default=16, help="Number of recurrences (default: 16)")
-    parser.add_argument("--max-tokens", type=int, default=128, help="Maximum tokens to generate (default: 128)")
+    parser.add_argument("--max-tokens", type=int, default=64, help="Maximum tokens to generate (default: 128)")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (default: 0.0)")
     parser.add_argument("--top-k", type=int, default=50, help="Top-k sampling parameter (default: 50)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--kv-budget", type=int, default=1, help="Fixed KV-cache budget for recurrences (default: 1)")
     parser.add_argument("--use-rec-warm-start", action="store_true", help="Use recurrent warm-start")
-    parser.add_argument("--max-points", type=int, default=5000, help="Max points for t-SNE (subsample if exceeded, default: 5000)")
+    parser.add_argument("--max-points", type=int, default=5000, help="Max points for embedding (subsample if exceeded, default: 5000)")
+    parser.add_argument("--method", type=str, default="tsne", choices=["pca", "tsne", "umap", "phate"], help="Dimensionality reduction method (default: tsne)")
+    # t-SNE params
     parser.add_argument("--perplexity", type=float, default=30.0, help="t-SNE perplexity (default: 30)")
+    # UMAP params
+    parser.add_argument("--n-neighbors", type=int, default=15, help="UMAP n_neighbors (default: 15)")
+    parser.add_argument("--min-dist", type=float, default=0.1, help="UMAP min_dist (default: 0.1)")
+    # PHATE params
+    parser.add_argument("--phate-knn", type=int, default=5, help="PHATE knn (default: 5)")
+    parser.add_argument("--phate-decay", type=int, default=40, help="PHATE decay (default: 40)")
+    parser.add_argument("--phate-t", type=str, default="auto", help="PHATE t diffusion time, int or 'auto' (default: auto)")
+    # Plot params
     parser.add_argument("--point-size", type=float, default=15.0, help="Scatter point size (default: 15)")
     parser.add_argument("--alpha", type=float, default=0.6, help="Point transparency (default: 0.6)")
     args = parser.parse_args()
@@ -289,21 +322,58 @@ def main():
         vectors, loop_steps, token_types, sample_ids, args.max_points, rng
     )
 
-    # Run t-SNE
-    print(f"\nRunning t-SNE on {len(vectors)} points (perplexity={args.perplexity})...")
-    tsne = TSNE(
-        n_components=2,
-        perplexity=args.perplexity,
-        random_state=args.seed,
-        max_iter=1000,
-        init="pca",
-        learning_rate="auto",
-    )
-    embedding = tsne.fit_transform(vectors)
-    print("t-SNE complete.")
+    # Run dimensionality reduction
+    method = args.method
+    n_points = len(vectors)
+    if method == "pca":
+        print(f"\nRunning PCA on {n_points} points...")
+        reducer = PCA(n_components=2, random_state=args.seed)
+        embedding = reducer.fit_transform(vectors)
+        var1, var2 = reducer.explained_variance_ratio_[:2] * 100
+        method_params = f"var={var1:.1f}%+{var2:.1f}%"
+        print(f"PCA complete. Explained variance: PC1={var1:.1f}%, PC2={var2:.1f}% (total={var1+var2:.1f}%)")
+    elif method == "tsne":
+        print(f"\nRunning t-SNE on {n_points} points (perplexity={args.perplexity})...")
+        reducer = TSNE(
+            n_components=2,
+            perplexity=args.perplexity,
+            random_state=args.seed,
+            max_iter=1000,
+            init="pca",
+            learning_rate="auto",
+        )
+        embedding = reducer.fit_transform(vectors)
+        method_params = f"perplexity={args.perplexity}"
+        print("t-SNE complete.")
+    elif method == "umap":
+        print(f"\nRunning UMAP on {n_points} points (n_neighbors={args.n_neighbors}, min_dist={args.min_dist})...")
+        reducer = umap.UMAP(
+            n_components=2,
+            n_neighbors=args.n_neighbors,
+            min_dist=args.min_dist,
+            random_state=args.seed,
+            metric="euclidean",
+        )
+        embedding = reducer.fit_transform(vectors)
+        method_params = f"n_neighbors={args.n_neighbors}, min_dist={args.min_dist}"
+        print("UMAP complete.")
+    elif method == "phate":
+        phate_t = args.phate_t if args.phate_t == "auto" else int(args.phate_t)
+        print(f"\nRunning PHATE on {n_points} points (knn={args.phate_knn}, decay={args.phate_decay}, t={phate_t})...")
+        reducer = phate.PHATE(
+            n_components=2,
+            knn=args.phate_knn,
+            decay=args.phate_decay,
+            t=phate_t,
+            random_state=args.seed,
+            n_jobs=-1,
+        )
+        embedding = reducer.fit_transform(vectors)
+        method_params = f"knn={args.phate_knn}, decay={args.phate_decay}, t={phate_t}"
+        print("PHATE complete.")
 
     # Plot
-    plot_tsne(
+    plot_embedding(
         embedding=embedding,
         loop_steps=loop_steps,
         token_types=token_types,
@@ -314,7 +384,8 @@ def main():
         alpha=args.alpha,
         kv_budget=args.kv_budget,
         use_warm_start=args.use_rec_warm_start,
-        perplexity=args.perplexity,
+        method=args.method,
+        method_params=method_params,
     )
 
 
