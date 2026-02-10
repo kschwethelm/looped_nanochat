@@ -89,21 +89,11 @@ parser.add_argument("--no-sample-recur", action="store_true", help="disable samp
 parser.add_argument("--use-exit-gate", action="store_true", help="enable learned exit gate and entropy-regularized objective")
 parser.add_argument("--exit-beta", type=float, default=0.05, help="entropy regularization weight for exit gate")
 parser.add_argument("--exit-min-recur", type=int, default=1, help="minimum recurrences before the exit gate can stop")
-parser.add_argument(
-    "--exit-log-stats",
-    action=argparse.BooleanOptionalAction,
-    default=False,
-    help="log exit gate stats periodically",
-)
+parser.add_argument("--exit-log-stats", action=argparse.BooleanOptionalAction, default=False, help="log exit gate stats periodically")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
-parser.add_argument(
-    "--target-param-data-ratio",
-    type=int,
-    default=7,
-    help="calculate num_iterations to maintain data:param ratio (accounts for parameter reuse + slight overtrain), -1 = disable)",
-)
+parser.add_argument("--target-param-data-ratio", type=int, default=7, help="calculate num_iterations to maintain data:param ratio, -1 = disable)")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size")
 parser.add_argument("--total-batch-size", type=int, default=524288, help="total batch size in tokens")

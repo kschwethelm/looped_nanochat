@@ -105,9 +105,11 @@ class ExitGate(nn.Module):
         super().__init__()
         self.proj = nn.Linear(n_embd, 1, bias=True)
 
+    def logits(self, x: torch.Tensor) -> torch.Tensor:
+        return self.proj(x).squeeze(-1)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits = self.proj(x).squeeze(-1)
-        return torch.sigmoid(logits)
+        return torch.sigmoid(self.logits(x).float())
 
 
 def compute_exit_distribution(lambdas: torch.Tensor, min_recur: int = 1) -> torch.Tensor:

@@ -69,12 +69,12 @@ def compute_gate_loss(model, idx, targets, num_recur, k, gamma):
         ).view(B, T)
         loss_t = loss_t.detach()
 
-        lambda_t = model.exit_gate(s).float()
+        exit_logit = model.exit_gate.logits(s).float()
         if prev_loss is not None and i + 1 >= max(2, model.config.exit_min_recur):
             improvement = (prev_loss - loss_t).clamp_min(0.0)
             w_t = torch.sigmoid(k * (improvement - gamma))
-            cont_prob = (1.0 - lambda_t).clamp(min=1e-6, max=1.0 - 1e-6)
-            bce = F.binary_cross_entropy(cont_prob, w_t, reduction="none")
+            cont_logit = -exit_logit  # cont = 1 - sigmoid(exit_logit) = sigmoid(-exit_logit)
+            bce = F.binary_cross_entropy_with_logits(cont_logit, w_t, reduction="none")
             mask = targets != -1
             total_bce += (bce * mask).sum()
             total_count += mask.sum()
@@ -117,7 +117,7 @@ def main():
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
     use_dummy_wandb = args.run == "dummy" or not master_process
-    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=args.run, config=user_config)
+    wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat_gate_ft", name=args.run, config=user_config)
 
     model, tokenizer, meta = load_model(args.source, device, phase="train", model_tag=args.model_tag, step=args.step)
     if not model.config.use_exit_gate or model.exit_gate is None:
