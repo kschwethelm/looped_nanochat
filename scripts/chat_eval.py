@@ -267,13 +267,32 @@ if __name__ == "__main__":
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
     parser.add_argument('-r', '--num-recur', type=str, default=None, help='Number of recurrences for recursive transformer (optional, uses model default if not specified)')
     parser.add_argument('-rws', '--use-rec-warm-start', action='store_true', help='Use recurrent warm-start (carry recurrent state when decoding tokens)')
-    parser.add_argument('-kb', '--kv-budget', type=int, default=1, help='Fixed KV-cache budget for recurrences. Default=1 (only cache final recurrence)')
+    parser.add_argument('-kb', '--kv-budget', type=str, default='1', help='KV-cache budget for recurrences. Single value broadcasts to all num-recur. Comma-separated list must match num-recur length. -1 means "same as num-recur" (cache all iterations). Default=1')
     args = parser.parse_args()
 
     # Parse num_recur argument - can be single value or comma-separated list
     recur_values = [None]  # default: use model's default
     if args.num_recur is not None:
         recur_values = [int(x.strip()) for x in args.num_recur.split(",")]
+
+    # Parse kv_budget argument - same format as num_recur, with -1 meaning "match num_recur"
+    raw_kv_budgets = [int(x.strip()) for x in args.kv_budget.split(",")]
+    if len(raw_kv_budgets) == 1:
+        # Broadcast single value to all recur_values
+        raw_kv_budgets = raw_kv_budgets * len(recur_values)
+    elif len(raw_kv_budgets) != len(recur_values):
+        parser.error(f"--kv-budget list length ({len(raw_kv_budgets)}) must match --num-recur length ({len(recur_values)})")
+
+    # Resolve -1 to match the corresponding num_recur value
+    kv_budgets = []
+    for kv_b, nr in zip(raw_kv_budgets, recur_values):
+        if kv_b == -1:
+            if nr is None:
+                parser.error("--kv-budget -1 requires explicit --num-recur (cannot resolve against model default)")
+            kv_budgets.append(nr)
+        else:
+            assert kv_b >= 1, f"kv_budget must be >= 1 or -1, got {kv_b}"
+            kv_budgets.append(kv_b)
 
     device_type = autodetect_device_type() if args.device_type == "" else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
@@ -299,10 +318,10 @@ if __name__ == "__main__":
     from nanochat.report import get_report
 
     all_results = {}
-    for num_recur in recur_values:
+    for num_recur, kv_budget in zip(recur_values, kv_budgets):
         recur_label = f"r{num_recur}" if num_recur is not None else "default"
         print0(f"\n{'=' * 80}")
-        print0(f"Evaluating with num_recur={num_recur if num_recur is not None else 'default'}")
+        print0(f"Evaluating with num_recur={num_recur if num_recur is not None else 'default'}, kv_budget={kv_budget}")
         print0(f"{'=' * 80}")
 
         results = {}
@@ -321,7 +340,7 @@ if __name__ == "__main__":
                     max_problems=args.max_problems,
                     num_recur=num_recur,
                     use_warm_start=args.use_rec_warm_start,
-                    kv_budget=args.kv_budget,
+                    kv_budget=kv_budget,
                 )
                 results[task_name] = acc
                 print0(f"{task_name} accuracy: {100 * acc:.2f}%")
@@ -357,7 +376,7 @@ if __name__ == "__main__":
             section=section_name,
             data=[
                 vars(args),
-                {"num_recur_here": num_recur},
+                {"num_recur_here": num_recur, "kv_budget_here": kv_budget},
                 results,
                 not_tested_dict,
                 chatcore_metric_dict,

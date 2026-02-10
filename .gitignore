@@ -16,3 +16,4 @@ knowledge/
 
 # Machine-specific config
 slurm/machine_config.sh
+slurm/rsync_weights.sh
