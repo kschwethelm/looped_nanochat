@@ -6,6 +6,7 @@ Usage:
 """
 
 import argparse
+import math
 
 import torch
 
@@ -13,7 +14,7 @@ from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
 
 
-def print_model_structure(config: GPTConfig) -> None:
+def print_model_structure(config: GPTConfig, *, verbose: bool = False) -> None:
     """Print detailed model structure with parameter dimensions."""
 
     # Initialize model with random weights
@@ -83,23 +84,24 @@ def print_model_structure(config: GPTConfig) -> None:
     print(f"\nEstimated FLOPs:     {model.estimate_flops():e} per token (at r={int(config.train_recur_mean)})")
     print()
 
-    # Print detailed parameter structure
-    print("=" * 80)
-    print("Detailed Parameter Structure")
-    print("=" * 80)
+    if verbose:
+        # Print detailed parameter structure
+        print("=" * 80)
+        print("Detailed Parameter Structure")
+        print("=" * 80)
 
-    for name, param in model.named_parameters():
-        print(f"{name:60s} {str(tuple(param.shape)):30s} {param.numel():>15,}")
+        for name, param in model.named_parameters():
+            print(f"{name:60s} {str(tuple(param.shape)):30s} {param.numel():>15,}")
 
-    print("=" * 80)
+        print("=" * 80)
 
-    # Print module structure summary
-    print()
-    print("=" * 80)
-    print("Module Structure Summary")
-    print("=" * 80)
-    print(model)
-    print("=" * 80)
+        # Print module structure summary
+        print()
+        print("=" * 80)
+        print("Module Structure Summary")
+        print("=" * 80)
+        print(model)
+        print("=" * 80)
 
     return model
 
@@ -147,7 +149,12 @@ if __name__ == "__main__":
         default=7,
         help="calculate num_iterations to maintain data:param ratio (accounts for parameter reuse + slight overtrain), -1 = disable)",
     )
-    parser.add_argument("--total-batch-size", type=int, default=524288, help="total batch size in tokens")
+    parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens (-1 = auto-compute via Power Lines paper)")
+    parser.add_argument("--verbose", action="store_true", help="print detailed parameter structure and module summary")
+    parser.add_argument("--weight-decay", type=float, default=0.2, help="reference weight decay (before scaling)")
+    parser.add_argument("--embedding-lr", type=float, default=0.3, help="reference embedding LR (before scaling)")
+    parser.add_argument("--unembedding-lr", type=float, default=0.004, help="reference unembedding LR (before scaling)")
+    parser.add_argument("--matrix-lr", type=float, default=0.02, help="reference matrix/Muon LR (before scaling)")
     args = parser.parse_args()
 
     # Tokenizer (for vocab size)
@@ -189,37 +196,81 @@ if __name__ == "__main__":
     )
 
     # Print structure
-    model = print_model_structure(config)
+    model = print_model_structure(config, verbose=args.verbose)
 
-    # Training horizon calculations (mirrors base_train.py logic)
+    # Training horizon, batch size, LR, and weight decay scaling (mirrors base_train.py logic)
+    # Refs: Power Lines (https://arxiv.org/abs/2505.13738), T_epoch (https://arxiv.org/abs/2405.13698)
     num_flops_per_token = model.estimate_flops()
     num_scaling_params = model.effective_params(num_recur=int(config.train_recur_mean))
 
+    # Reference s12 model
+    B_REF = 2**19
+    ref_dim = 12 * args.aspect_ratio
+    ref_dim = ((ref_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
+    config_kwargs = dict(
+        sequence_len=args.max_seq_len, vocab_size=vocab_size, size=12,
+        n_head=ref_dim // args.head_dim, n_kv_head=ref_dim // args.head_dim, n_embd=ref_dim,
+        window_pattern=args.window_pattern, n_prelude=args.n_prelude, n_recur_block=args.n_recur_block,
+        n_coda=args.n_coda, train_recur_mean=args.train_recur_mean, train_recur_max=args.train_recur_max,
+        bptt_k=args.bptt_k,
+    )
+    with torch.device("meta"):
+        ref_model = GPT(GPTConfig(**config_kwargs))
+    ref_scaling_params = ref_model.effective_params(num_recur=int(config.train_recur_mean))
+    del ref_model
+
+    # 1) Calculate target training tokens
     if args.num_iterations > 0:
+        assert args.total_batch_size > 0, "Must specify --total-batch-size when using --num-iterations"
+        total_batch_size = args.total_batch_size
+        target_tokens = args.num_iterations * total_batch_size
         num_iterations = args.num_iterations
         source = "explicit"
     elif args.target_flops > 0:
-        num_iterations = round(args.target_flops / (num_flops_per_token * args.total_batch_size))
+        target_tokens = round(args.target_flops / num_flops_per_token)
         source = f"target_flops={args.target_flops:e}"
     elif args.target_param_data_ratio > 0:
-        target_tokens = args.target_param_data_ratio * num_scaling_params
-        num_iterations = int(target_tokens // args.total_batch_size)
+        target_tokens = round(args.target_param_data_ratio * num_scaling_params)
         source = f"target_param_data_ratio={args.target_param_data_ratio}"
     else:
         num_iterations = None
         source = None
 
-    if num_iterations is not None:
-        total_tokens = args.total_batch_size * num_iterations
+    if source is not None:
+        D_REF = (target_tokens / num_scaling_params) * ref_scaling_params
+
+        # 2) Auto-compute optimal batch size: Bopt ∝ D^0.383 (Power Lines paper)
+        if args.num_iterations <= 0:
+            total_batch_size = args.total_batch_size
+            if total_batch_size == -1:
+                batch_size_ratio = target_tokens / D_REF
+                predicted_batch_size = B_REF * batch_size_ratio ** 0.383
+                total_batch_size = 2 ** round(math.log2(predicted_batch_size))
+            num_iterations = round(target_tokens / total_batch_size)
+
+        # 3) LR scaling: η ∝ √(B/B_ref)
+        batch_ratio = total_batch_size / B_REF
+        batch_lr_scale = batch_ratio ** 0.5 if batch_ratio != 1.0 else 1.0
+
+        # 4) Weight decay scaling via T_epoch: λ = λ_ref · √(B/B_ref) · (D_ref/D)
+        weight_decay_scaled = args.weight_decay * math.sqrt(total_batch_size / B_REF) * (D_REF / target_tokens)
+
+        total_tokens = total_batch_size * num_iterations
         param_data_ratio = total_tokens / num_scaling_params
         total_flops = num_flops_per_token * total_tokens
 
         print("=" * 80)
-        print(f"Training Horizon ({source})")
+        print(f"Training Horizon & Scaling ({source})")
         print("=" * 80)
-        print(f"  Total batch size:      {args.total_batch_size:,}")
+        print(f"  Total batch size:      {total_batch_size:,}  (ref: {B_REF:,})")
         print(f"  Num iterations:        {num_iterations:,}")
         print(f"  Total tokens:          {total_tokens:,}")
         print(f"  Total FLOPs:           {total_flops:e}")
         print(f"  Tokens:Params ratio:   {param_data_ratio:.2f}")
+        print()
+        print(f"  LR scale factor:       {batch_lr_scale:.4f}")
+        print(f"    Embedding LR:        {args.embedding_lr} -> {args.embedding_lr * batch_lr_scale:.6f}")
+        print(f"    Unembedding LR:      {args.unembedding_lr} -> {args.unembedding_lr * batch_lr_scale:.6f}")
+        print(f"    Matrix/Muon LR:      {args.matrix_lr} -> {args.matrix_lr * batch_lr_scale:.6f}")
+        print(f"  Weight decay:          {args.weight_decay} -> {weight_decay_scaled:.6f}")
         print("=" * 80)

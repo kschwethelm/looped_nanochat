@@ -12,6 +12,7 @@ python -m scripts.base_train --size=4 --max-seq-len=512 --device-batch-size=1 --
 """
 
 import gc
+import math
 import os
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
@@ -95,7 +96,7 @@ parser.add_argument(
 )
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size")
-parser.add_argument("--total-batch-size", type=int, default=524288, help="total batch size in tokens")
+parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens (-1 = auto-compute via Power Lines paper)")
 parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters (Adam)")
 parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learning rate for unembedding parameters (Adam)")
 parser.add_argument("--weight-decay", type=float, default=0.2, help="cautious weight decay for the Muon optimizer (for weights)")
@@ -183,30 +184,8 @@ print0(f"head_dim: {head_dim}")
 print0(f"num_kv_heads: {num_kv_heads}")
 
 # Optimizer / data / training length related hyperparameters
-# figure out the needed gradient accumulation to reach the desired total batch size
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len  # tokens per iteration for a single rank
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size  # total tokens per iteration for all ranks
-assert args.total_batch_size % world_tokens_per_fwdbwd == 0
-grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
-print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
-print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
-print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
-
-# Batch size scaling for learning rates (hyperparameters were tuned at reference batch size 2^19)
-batch_lr_scale = 1.0
-reference_batch_size = 2**19
-batch_ratio = args.total_batch_size / reference_batch_size
-if batch_ratio != 1.0:
-    # SGD: linear scaling with batch size is standard (not used in nanochat)
-    # AdamW: sqrt scaling is standard
-    # Muon: sqrt scaling is an assumption - not fully studied, but it's a second-order-ish optimizer
-    batch_lr_scale = batch_ratio**0.5
-    print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {args.total_batch_size:,} (reference: {reference_batch_size:,})")
-
-# Weight decay is tuned at s12 and its scaling seems to be \propto 1/channels^2 (or equivalently, \propto 1/size^2 due to constant aspect ratio)
-weight_decay_scaled = args.weight_decay * (12 / args.size) ** 2
-if args.size != 12:
-    print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for size {args.size}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
@@ -274,25 +253,82 @@ num_scaling_params = num_effective_params
 num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 
-# Calculate number of iterations. Either it is given, or from target flops, or from target data:param ratio (in that order)
+# -----------------------------------------------------------------------------
+# Training horizon, batch size, learning rate, and weight decay scaling
+# Positive results on standard nanochat training runs; introduced by Karpathy, not specifically optimized for looped LM
+# However, hyperparameter analysis showed that looped LM (r=4) is robust to standard LM params
+# Refs: Power Lines (https://arxiv.org/abs/2505.13738), T_epoch (https://arxiv.org/abs/2405.13698)
+
+# Reference s12 model: hyperparameters are tuned here and transferred to other sizes (muP style)
+B_REF = 2**19  # optimal batch size at s12 ~= 524,288 tokens (measured empirically)
+ref_dim = 12 * args.aspect_ratio
+ref_dim = ((ref_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
+ref_model_kwargs = {**model_config_kwargs, "size": 12, "n_embd": ref_dim, "n_head": ref_dim // args.head_dim, "n_kv_head": ref_dim // args.head_dim}
+with torch.device("meta"):
+    ref_model = GPT(GPTConfig(**ref_model_kwargs))
+ref_scaling_params = ref_model.effective_params(num_recur=int(model_config.train_recur_mean))
+del ref_model
+
+# 1) Calculate target training tokens from the chosen horizon method
 assert args.num_iterations > 0 or args.target_param_data_ratio > 0 or args.target_flops > 0
 if args.num_iterations > 0:
+    assert args.total_batch_size > 0, "Must specify --total-batch-size when using --num-iterations"
+    total_batch_size = args.total_batch_size
+    target_tokens = args.num_iterations * total_batch_size
     num_iterations = args.num_iterations
     print0(f"Using user-provided number of iterations: {num_iterations:,}")
 elif args.target_flops > 0:
-    # calculate the number of iterations from the target flops
-    num_iterations = round(args.target_flops / (num_flops_per_token * args.total_batch_size))
-    print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
-elif args.target_param_data_ratio > 0:
-    # calculate the number of iterations from the target param data ratio (use scaling params per Kaplan et al.)
-    target_tokens = args.target_param_data_ratio * num_scaling_params
-    num_iterations = target_tokens // args.total_batch_size
-    print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
+    target_tokens = round(args.target_flops / num_flops_per_token)
+    print0(f"Target tokens from target FLOPs: {target_tokens:,}")
 else:
-    raise ValueError("No training horizon specified")
-total_tokens = args.total_batch_size * num_iterations
+    target_tokens = round(args.target_param_data_ratio * num_scaling_params)
+    print0(f"Target tokens from data:param ratio {args.target_param_data_ratio}: {target_tokens:,}")
+
+# D_REF: what the s12 reference model's training horizon would be at the same effective data:param ratio
+D_REF = (target_tokens / num_scaling_params) * ref_scaling_params
+print0(f"Reference training horizon (D_REF): {D_REF:,.0f} tokens")
+
+# 2) Auto-compute optimal batch size: Bopt ∝ D^0.383 (Power Lines paper)
+if args.num_iterations <= 0:
+    total_batch_size = args.total_batch_size
+    if total_batch_size == -1:
+        batch_size_ratio = target_tokens / D_REF
+        predicted_batch_size = B_REF * batch_size_ratio ** 0.383
+        total_batch_size = 2 ** round(math.log2(predicted_batch_size))
+        print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
+    num_iterations = round(target_tokens / total_batch_size)
+    if args.target_flops > 0:
+        print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
+    else:
+        print0(f"Calculated number of iterations from target data:param ratio: {num_iterations:,}")
+
+# Gradient accumulation
+assert total_batch_size % world_tokens_per_fwdbwd == 0, (
+    f"total_batch_size ({total_batch_size:,}) must be divisible by tokens per micro-batch ({world_tokens_per_fwdbwd:,})"
+)
+grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
+print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
+print0(f"Tokens / micro-batch (all ranks): {world_tokens_per_fwdbwd:,}")
+print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+
+# 3) Learning rate scaling: η ∝ √(B/B_ref) (sqrt scaling for AdamW, assumed for Muon too)
+batch_lr_scale = 1.0
+batch_ratio = total_batch_size / B_REF
+if batch_ratio != 1.0:
+    batch_lr_scale = batch_ratio ** 0.5
+    print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {total_batch_size:,} (reference: {B_REF:,})")
+
+# 4) Weight decay scaling via T_epoch framework: λ = λ_ref · √(B/B_ref) · (D_ref/D)
+# Central idea: T_epoch = B/(η·λ·D) should remain constant across scales.
+# With η ∝ √(B/B_ref), keeping T_epoch constant requires: λ ∝ √(B/B_ref) · (D_ref/D)
+# Note: Theory is for AdamW, applied to Muon as well (assumption!)
+weight_decay_scaled = args.weight_decay * math.sqrt(total_batch_size / B_REF) * (D_REF / target_tokens)
+if weight_decay_scaled != args.weight_decay:
+    print0(f"Scaling weight decay from {args.weight_decay:.6f} to {weight_decay_scaled:.6f}")
+
+total_tokens = total_batch_size * num_iterations
 print0(f"Total number of training tokens: {total_tokens:,}")
-print0(f"Tokens : Params ratio: {args.total_batch_size * num_iterations / num_scaling_params:.2f}")  # Chinchilla is ~20
+print0(f"Tokens : Params ratio: {total_tokens / num_scaling_params:.2f}")  # Chinchilla is ~20
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # -----------------------------------------------------------------------------
@@ -379,7 +415,7 @@ else:
 # Training loop
 while True:
     last_step = step == num_iterations  # loop runs num_iterations+1 times so that we can eval/save at the end
-    flops_so_far = num_flops_per_token * args.total_batch_size * step
+    flops_so_far = num_flops_per_token * total_batch_size * step
 
     # once in a while: evaluate the val bpb (all ranks participate)
     if args.eval_every > 0 and (last_step or (step > 0 and step % args.eval_every == 0)):
@@ -533,8 +569,8 @@ while True:
     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f  # EMA the training loss
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta ** (step + 1))  # debias the EMA
     pct_done = 100 * step / num_iterations
-    tok_per_sec = int(args.total_batch_size / dt)
-    flops_per_sec = num_flops_per_token * args.total_batch_size / dt
+    tok_per_sec = int(total_batch_size / dt)
+    flops_per_sec = num_flops_per_token * total_batch_size / dt
     mfu = 100 * flops_per_sec / (gpu_peak_flops * ddp_world_size)
     if step > 10:
         total_training_time += dt  # only count the time after the first 10 steps
@@ -607,8 +643,8 @@ get_report().log(
             "Number of FLOPs per token": f"{num_flops_per_token:e}",
             "Calculated number of iterations": num_iterations,
             "Number of training tokens": total_tokens,
-            "Tokens : Params ratio": args.total_batch_size * num_iterations / num_params,
-            "Tokens : Effective Params ratio": args.total_batch_size * num_iterations / num_effective_params,
+            "Tokens : Params ratio": total_tokens / num_params,
+            "Tokens : Effective Params ratio": total_tokens / num_effective_params,
             "DDP world size": ddp_world_size,
             "warmup_ratio": args.warmup_ratio,
             "warmdown_ratio": args.warmdown_ratio,
