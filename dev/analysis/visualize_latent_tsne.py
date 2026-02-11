@@ -1,8 +1,8 @@
 """
-t-SNE visualization of latent states across multiple GSM8K samples.
+t-SNE visualization of latent states across multiple evaluation samples.
 
 This script:
-1. Loads multiple GSM8K test cases
+1. Loads multiple test cases from a chosen evaluation dataset
 2. Generates responses using the looped transformer
 3. Captures the recurrent state after each loop iteration for all tokens (input + output)
 4. Projects the high-dimensional latent states into 2D via t-SNE
@@ -10,10 +10,12 @@ This script:
 
 Example:
     uv run python dev/analysis/visualize_latent_tsne.py -i sft --num-recur 16 --num-samples 5
+    uv run python dev/analysis/visualize_latent_tsne.py -i sft --num-recur 16 --task-name MMLU --num-samples 5
 """
 
 import argparse
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 
 import matplotlib.colors as mcolors
@@ -26,13 +28,26 @@ from dev.analysis.common import generate_with_latent_tracking
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_init, get_base_dir
 from nanochat.engine import Engine
+from tasks.arc import ARC
 from tasks.gsm8k import GSM8K
+from tasks.humaneval import HumanEval
+from tasks.mmlu import MMLU
+from tasks.spellingbee import SpellingBee
+
+TASK_MODULES = {
+    "GSM8K": partial(GSM8K, subset="main", split="test"),
+    "ARC-Easy": partial(ARC, subset="ARC-Easy", split="test"),
+    "ARC-Challenge": partial(ARC, subset="ARC-Challenge", split="test"),
+    "MMLU": partial(MMLU, subset="all", split="test"),
+    "HumanEval": HumanEval,
+    "SpellingBee": partial(SpellingBee, size=256, split="test"),
+}
 
 
 def collect_latent_records(
     engine: Engine,
     tokenizer,
-    gsm8k: GSM8K,
+    task_object,
     num_samples: int,
     sample_idx: int,
     num_recur: int,
@@ -45,7 +60,7 @@ def collect_latent_records(
     autocast_ctx,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Collect latent state vectors across multiple GSM8K samples.
+    Collect latent state vectors across multiple evaluation samples.
 
     Returns:
         vectors: (N, hidden_dim) array of latent state vectors
@@ -62,7 +77,7 @@ def collect_latent_records(
         idx = sample_idx + sample_offset
         print(f"\nProcessing sample {idx} ({sample_offset + 1}/{num_samples})")
 
-        conversation = gsm8k.get_example(idx)
+        conversation = task_object.get_example(idx)
         question = conversation["messages"][0]["content"]
         prompt_tokens = tokenizer.render_for_completion(conversation)
 
@@ -157,6 +172,7 @@ def plot_tsne(
     num_recur: int,
     num_samples: int,
     source: str,
+    task_name: str,
     point_size: float,
     alpha: float,
     kv_budget: int,
@@ -221,17 +237,19 @@ def plot_tsne(
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
     warmstart_suffix = "_warmstart" if use_warm_start else ""
-    output_path = plots_dir / f"gsm8k_latent_tsne_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
+    task_slug = task_name.lower().replace("-", "_")
+    output_path = plots_dir / f"{task_slug}_latent_tsne_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nt-SNE plot saved to: {output_path}")
     plt.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="t-SNE visualization of latent states across GSM8K samples")
+    parser = argparse.ArgumentParser(description="t-SNE visualization of latent states across evaluation samples")
     parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: base|sft|rl (default: sft)")
     parser.add_argument("--model-tag", type=str, default=None, help="Model tag (e.g., d12). If not specified, uses largest model.")
-    parser.add_argument("--sample-idx", type=int, default=0, help="GSM8K sample index to start from (default: 0)")
+    parser.add_argument("-a", "--task-name", type=str, default="GSM8K", choices=list(TASK_MODULES.keys()), help="Evaluation task to load (default: GSM8K)")
+    parser.add_argument("--sample-idx", type=int, default=0, help="Sample index to start from (default: 0)")
     parser.add_argument("--num-samples", type=int, default=5, help="Number of samples (default: 5)")
     parser.add_argument("--num-recur", type=int, default=16, help="Number of recurrences (default: 16)")
     parser.add_argument("--max-tokens", type=int, default=128, help="Maximum tokens to generate (default: 128)")
@@ -262,15 +280,15 @@ def main():
     num_recur = args.num_recur if args.num_recur is not None else int(model.config.train_recur_mean)
     print(f"Using num_recur={num_recur}")
 
-    # Load GSM8K dataset
-    print("Loading GSM8K dataset...")
-    gsm8k = GSM8K(subset="main", split="test")
+    # Load dataset
+    print(f"Loading {args.task_name} dataset...")
+    task_object = TASK_MODULES[args.task_name]()
 
     # Collect latent states
     vectors, loop_steps, token_types, sample_ids = collect_latent_records(
         engine=engine,
         tokenizer=tokenizer,
-        gsm8k=gsm8k,
+        task_object=task_object,
         num_samples=args.num_samples,
         sample_idx=args.sample_idx,
         num_recur=num_recur,
@@ -310,6 +328,7 @@ def main():
         num_recur=num_recur,
         num_samples=args.num_samples,
         source=args.source,
+        task_name=args.task_name,
         point_size=args.point_size,
         alpha=args.alpha,
         kv_budget=args.kv_budget,

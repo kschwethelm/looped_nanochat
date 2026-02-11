@@ -704,37 +704,3 @@ class GPT(nn.Module):
             return loss
         else:
             return logits, s  # Return logits and final state
-
-    @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, num_recur=None):
-        """
-        Naive autoregressive streaming inference.
-        To make it super simple, let's assume:
-        - batch size is 1
-        - ids and the yielded tokens are simple Python lists and ints
-        """
-        assert isinstance(tokens, list)
-        device = self.get_device()
-        rng = None
-        if temperature > 0:
-            rng = torch.Generator(device=device)
-            rng.manual_seed(seed)
-        ids = torch.tensor([tokens], dtype=torch.long, device=device)  # add batch dim
-        warm_start_state = None
-        for _ in range(max_tokens):
-            logits, warm_start_state = self.forward(ids, num_recur=num_recur, warm_start_state=warm_start_state)  # (B, T, vocab_size)
-            # Only keep last position's state for warm-start (shape B,1,h)
-            warm_start_state = warm_start_state[:, -1:, :]
-            logits = logits[:, -1, :]  # (B, vocab_size)
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("Inf")
-            if temperature > 0:
-                logits = logits / temperature
-                probs = F.softmax(logits, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
-            else:
-                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat((ids, next_ids), dim=1)
-            token = next_ids.item()
-            yield token

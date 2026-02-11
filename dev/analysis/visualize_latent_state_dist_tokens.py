@@ -1,8 +1,8 @@
 """
-Track latent states during GSM8K response generation and visualize L2 distances.
+Track latent states during response generation and visualize L2 distances.
 
 This script:
-1. Loads one GSM8K test case
+1. Loads one test case from a chosen evaluation dataset
 2. Generates a response using the looped transformer
 3. Captures the recurrent state after each loop iteration for ALL tokens
 4. Plots a heatmap showing L2 distance between consecutive loop steps per token
@@ -11,10 +11,12 @@ The latent state tracking is done via PyTorch hooks on the final recurrent block
 
 Usage:
     uv run python dev/analysis/visualize_latent_state_dist_tokens.py -i sft --num-recur 16 --sample-idx 0
+    uv run python dev/analysis/visualize_latent_state_dist_tokens.py -i sft --num-recur 16 --task-name ARC-Easy --sample-idx 5
 """
 
 import argparse
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,7 +28,20 @@ from dev.analysis.common import generate_with_latent_tracking
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_init, get_base_dir
 from nanochat.engine import Engine
+from tasks.arc import ARC
 from tasks.gsm8k import GSM8K
+from tasks.humaneval import HumanEval
+from tasks.mmlu import MMLU
+from tasks.spellingbee import SpellingBee
+
+TASK_MODULES = {
+    "GSM8K": partial(GSM8K, subset="main", split="test"),
+    "ARC-Easy": partial(ARC, subset="ARC-Easy", split="test"),
+    "ARC-Challenge": partial(ARC, subset="ARC-Challenge", split="test"),
+    "MMLU": partial(MMLU, subset="all", split="test"),
+    "HumanEval": HumanEval,
+    "SpellingBee": partial(SpellingBee, size=256, split="test"),
+}
 
 
 def plot_latent_state_distances(
@@ -36,6 +51,7 @@ def plot_latent_state_distances(
     output_latent_states: list[list[torch.Tensor]],
     tokenizer,
     num_recur: int,
+    task_name: str = "GSM8K",
     kv_budget: int = 1,
     use_warm_start: bool = False,
     vmin: float | None = None,
@@ -175,9 +191,10 @@ def plot_latent_state_distances(
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
     warmstart_suffix = "_warmstart" if use_warm_start else ""
+    task_slug = task_name.lower().replace("-", "_")
     output_path = (
         plots_dir
-        / f"gsm8k_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
+        / f"{task_slug}_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
     )
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nPlot saved to: {output_path}")
@@ -185,11 +202,12 @@ def plot_latent_state_distances(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Track and plot latent states for one GSM8K sample"
+        description="Track and plot latent states for one evaluation sample"
     )
     parser.add_argument("-i", "--source", type=str, default="sft", help="Source of the model: base|sft|rl (default: sft)")
     parser.add_argument("--model-tag", type=str, default=None, help="Model tag (e.g., s12). If not specified, uses largest model.")
-    parser.add_argument("--sample-idx", type=int, default=0, help="GSM8K sample index to process (default: 0)")
+    parser.add_argument("-a", "--task-name", type=str, default="GSM8K", choices=list(TASK_MODULES.keys()), help="Evaluation task to load (default: GSM8K)")
+    parser.add_argument("--sample-idx", type=int, default=0, help="Sample index to process (default: 0)")
     parser.add_argument("--num-recur", type=int, default=16, help="Number of recurrences (default: 16)")
     parser.add_argument("--max-tokens", type=int, default=64, help="Maximum tokens to generate (default: 64)")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (default: 0.0)")
@@ -222,13 +240,13 @@ def main():
     num_recur = args.num_recur if args.num_recur is not None else int(model.config.train_recur_mean)
     print(f"Using num_recur={num_recur}")
 
-    # Load GSM8K dataset
-    print("Loading GSM8K dataset...")
-    gsm8k = GSM8K(subset="main", split="test")
+    # Load dataset
+    print(f"Loading {args.task_name} dataset...")
+    task_object = TASK_MODULES[args.task_name]()
 
     # Get single sample
     print(f"\nProcessing sample {args.sample_idx}")
-    conversation = gsm8k.get_example(args.sample_idx)
+    conversation = task_object.get_example(args.sample_idx)
     question = conversation["messages"][0]["content"]
 
     # Render prompt for completion
@@ -267,6 +285,7 @@ def main():
             output_latent_states=output_latent_states,
             tokenizer=tokenizer,
             num_recur=num_recur,
+            task_name=args.task_name,
             kv_budget=args.kv_budget,
             use_warm_start=args.use_rec_warm_start,
             vmin=args.vmin,
