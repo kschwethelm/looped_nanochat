@@ -2,7 +2,59 @@
 
 Running log of experiments on the looped (depth-recurrent) transformer, forked from [nanochat](https://github.com/karpathy/nanochat). Started ~Feb 1 2026.
 
-**Goal:** Train a solid looped LLM baseline under limited compute. Stability and predictable training take priority over chasing small accuracy gains.
+**Goal:** Exploratory work on understanding looped LLM behavior from the ground up. Small model sizes, limited compute budget, single runs for quick iteration. The end goal is a model with true dynamic compute and meaningful depth scaling at reasonable cost.
+
+---
+
+## 2026-02-11: Naive Recursion Depth Sweep — Diminishing Returns
+
+Swept num_recur ∈ {2, 4, 6} at fixed IsoFLOPs (2.15e18) on S12 (768 width, 158M physical params). Architecture identical across runs (2 prelude, 4 recur block layers, 2 coda) — only the loop count changes. Fixed recurrence (no sampling), default hyperparameters.
+
+Under a fixed FLOPs budget, more recursions means more FLOPs per token and proportionally fewer tokens seen.
+
+### Base Model
+
+| Model | r | FLOPs/tok | Tokens | Val BPB | Steps | Time |
+|-------|---|-----------|--------|---------|-------|------|
+| r2_2.15e18_s12 | 2 | 9.96e8 | 2.16B | **0.9060** | 4118 | 112m |
+| r4_2.15e18_s12 | 4 | 1.44e9 | 1.49B | 0.9144 | 2839 | 110m |
+| r6_2.15e18_s12 | 6 | 1.89e9 | 1.14B | 0.9281 | 2167 | 92m |
+
+Val BPB degrades monotonically with r. The extra depth doesn't compensate for seeing fewer tokens — r2 wins by seeing nearly 2× the data of r6.
+
+### SFT + ChatCORE
+
+All base models SFT'd for 1 epoch (816 steps) with fixed recurrence at their respective r, same hyperparameters.
+
+| Model | SFT Val BPB | ARC-E | ARC-C | MMLU | SpellingBee | GSM8K | HumanEval | ChatCORE |
+|-------|-------------|-------|-------|------|-------------|-------|-----------|----------|
+| r2 | 0.4561 | 0.366 | 0.282 | 0.321 | 0.969 | 0.007 | 0.079 | 0.2248 |
+| r4 | **0.4555** | 0.367 | 0.290 | 0.313 | **0.992** | 0.008 | 0.079 | **0.2289** |
+| r6 | 0.4607 | **0.383** | **0.304** | 0.300 | 0.961 | 0.009 | 0.079 | 0.2274 |
+
+SFT closes the base model gap — all three land within ~0.005 BPB and ~0.004 ChatCORE. The base training differences wash out. r6 edges out on ARC (slightly harder reasoning) but the margins are within noise at this scale.
+
+### Interpretation
+
+Latent state visualization shows models trained with more recursions converge slower to a fixed point — they spread the same computation across more iterations. This matters because evaluating a single model (e.g. r6) at r=2 vs r=6 looks like test-time scaling works. But cross-model comparison reveals the illusion: r2 at r=2 matches or beats r6 at r=6. The model just needs more steps to reach the same fixed point, not a better one.
+
+Consistent with 2026-02-09: recurrence sampling shifts the convergence point to the distribution's mean but doesn't raise the ceiling. At ~158M params, the recurrent block learns a near-identity mapping after convergence. Whether this changes with scale is open.
+
+### Limitations
+
+- **No coherent generation.** S12 models can't produce meaningful text. Generative benchmarks (HumanEval, GSM8K) score ~0 and are excluded from CORE.
+- **Shallow evals.** >95% SpellingBee likely reflects pattern matching rather than depth-dependent reasoning — too shallow to probe recursion scaling. ARC/MMLU differences are within noise.
+- **Single runs.** No error bars. Differences below ~0.01 BPB or ~0.005 ChatCORE should be treated as noise.
+
+### Next steps
+
+- **Scale up.** S18+ models trained at >1e19 FLOPs produce coherent text (e.g. correctly complete "The capital of France is"). Base training on 2× 94GB H100 takes ~4h. Revisit depth scaling there.
+- **Depth-sensitive evals.** Design tasks tractable at small scale that reward iterative computation: multi-digit arithmetic, parity checks, string reversal/counting, simple logical deduction, synthetic multi-hop lookup in context. These isolate depth benefit from knowledge capacity.
+- **Token-level gating.** Explore learned per-token loop exit to compress unnecessary iterations — the missing training signal linking extra compute to harder tokens.
+
+### Speculation
+
+Geiping's Huginn trains with many recursions but with little pressure to compress capability across loops. Self-distillation from a high-r teacher to a low-r student could force the model to be more loop-efficient, rather than just spreading the same computation across more steps. This also suggests that proposed "specialized" post-training on lower recursion counts may primarily compress loops rather than improve depth scaling itself. Worth investigating, but caution warranted until the compression-vs-scaling distinction is better understood.
 
 ---
 
