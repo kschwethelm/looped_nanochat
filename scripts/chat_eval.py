@@ -233,7 +233,8 @@ def run_chat_eval(
     model,
     tokenizer,
     engine,
-    batch_size=1,
+    cat_batch_size=8,
+    gen_batch_size=4,
     num_samples=1,
     max_new_tokens=512,
     temperature=0.0,
@@ -268,14 +269,14 @@ def run_chat_eval(
             num_recur=num_recur,
             use_warm_start=use_warm_start,
             kv_budget=kv_budget,
-            batch_size=batch_size,
+            batch_size=gen_batch_size,
         )
     elif task_object.eval_type == "categorical":
         acc = run_categorical_eval(
             task_object,
             tokenizer,
             model,
-            batch_size,
+            cat_batch_size,
             max_problems=max_problems,
             num_recur=num_recur,
         )
@@ -295,7 +296,8 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--max-new-tokens', type=int, default=512)
     parser.add_argument('-n', '--num-samples', type=int, default=1)
     parser.add_argument('-k', '--top-k', type=int, default=50)
-    parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for evaluation (categorical and generative when num_samples=1)')
+    parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
+    parser.add_argument('-bg', '--gen-batch-size', type=int, default=4, help='Batch size for generative evaluation (when num_samples=1). Smaller than -b because decode KV cache is much larger.')
     parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
@@ -367,7 +369,8 @@ if __name__ == "__main__":
                     model,
                     tokenizer,
                     engine,
-                    batch_size=args.batch_size,
+                    cat_batch_size=args.batch_size,
+                    gen_batch_size=args.gen_batch_size,
                     num_samples=args.num_samples,
                     max_new_tokens=args.max_new_tokens,
                     temperature=args.temperature,
