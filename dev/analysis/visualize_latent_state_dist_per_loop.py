@@ -7,10 +7,13 @@ This script:
 3. Captures the recurrent state after each loop iteration for ALL tokens (input + output)
    - Input tokens: captured during prefill pass
    - Output tokens: captured during generation
-4. Plots average L2 distance and cosine similarity per loop step for:
+4. Plots average L2 distance, cosine similarity, and KL divergence per loop step for:
    - Full sequence
    - Input sequence only (actual prompt tokens)
    - Output sequence only (generated tokens)
+
+The KL divergence measures how the output distribution (after coda + lm_head) changes
+between consecutive loop steps: KL(p_{i+1} || p_i).
 
 The latent state tracking is done via PyTorch hooks on the final recurrent block.
 
@@ -159,6 +162,69 @@ def compute_distance_metrics(
     }
 
 
+def compute_output_kl_divergence(
+    intermediate_logits: list[torch.Tensor],
+    num_input_tokens: int,
+) -> dict:
+    """
+    Compute KL divergence between output distributions at consecutive loop steps.
+
+    Takes pre-computed intermediate logits (from forward with return_intermediate_logits=True)
+    and computes KL(p_{i+1} || p_i) per token per transition.
+
+    Args:
+        intermediate_logits: list of num_recur tensors, each (total_tokens, vocab_size).
+            Produced by generate_with_latent_tracking with return_intermediate_logits=True.
+        num_input_tokens: number of prompt tokens (for input/output split).
+
+    Returns:
+        Dict with 'full', 'input', 'output' keys, each containing
+        (means, stds, medians, q25, q75) arrays of shape (num_recur - 1,).
+    """
+    num_recur = len(intermediate_logits)
+    num_tokens = intermediate_logits[0].shape[0]
+
+    kl_divergences = np.zeros((num_tokens, num_recur - 1))
+    prev_log_probs = None
+
+    for recur_idx in range(num_recur):
+        log_probs = F.log_softmax(intermediate_logits[recur_idx], dim=-1)  # (num_tokens, vocab_size)
+
+        if prev_log_probs is not None:
+            # KL(p_current || p_prev) using log_target=True for numerical stability
+            kl = F.kl_div(prev_log_probs, log_probs, reduction="none", log_target=True).sum(dim=-1)
+            kl_divergences[:, recur_idx - 1] = kl.numpy()
+
+        prev_log_probs = log_probs
+
+    # Compute statistics for full / input / output splits
+    def compute_stats(data, axis=0):
+        means = np.mean(data, axis=axis)
+        stds = np.std(data, axis=axis)
+        medians = np.median(data, axis=axis)
+        q25 = np.percentile(data, 25, axis=axis)
+        q75 = np.percentile(data, 75, axis=axis)
+        return means, stds, medians, q25, q75
+
+    kl_full = compute_stats(kl_divergences)
+
+    if num_input_tokens > 0:
+        kl_input = compute_stats(kl_divergences[:num_input_tokens])
+    else:
+        kl_input = (None,) * 5
+
+    if num_input_tokens < num_tokens:
+        kl_output = compute_stats(kl_divergences[num_input_tokens:])
+    else:
+        kl_output = (None,) * 5
+
+    return {
+        "full": kl_full,
+        "input": kl_input,
+        "output": kl_output,
+    }
+
+
 def aggregate_metrics_across_samples(all_metrics: list[dict]) -> dict:
     """
     Aggregate metrics from multiple samples.
@@ -234,6 +300,11 @@ def aggregate_metrics_across_samples(all_metrics: list[dict]) -> dict:
             "input": collect_and_aggregate("state_norms", "input"),
             "output": collect_and_aggregate("state_norms", "output"),
         },
+        "kl_divergence": {
+            "full": collect_and_aggregate("kl_divergence", "full"),
+            "input": collect_and_aggregate("kl_divergence", "input"),
+            "output": collect_and_aggregate("kl_divergence", "output"),
+        },
     }
 
 
@@ -253,13 +324,15 @@ def plot_distance_curves(
     """
     Plot comprehensive distance metrics per loop step.
 
-    Creates six subplots:
+    Creates eight subplots:
     1. L2 distance (mean ± std) - log scale
     2. L2 distance (median + IQR) - log scale
     3. Relative L2 distance (median + IQR)
     4. State norms (median + IQR)
     5. Cosine similarity (mean ± std)
     6. Cosine similarity (median + IQR)
+    7. KL divergence (mean ± std) - log scale
+    8. KL divergence (median + IQR) - log scale
 
     Args:
         num_samples: Number of samples averaged (for plot title/filename)
@@ -269,8 +342,8 @@ def plot_distance_curves(
     loop_steps_transitions = np.arange(1, num_recur)  # For distances between states
     loop_steps_states = np.arange(0, num_recur)  # For state norms
 
-    fig = plt.figure(figsize=(18, 16))
-    gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
+    fig = plt.figure(figsize=(18, 21))
+    gs = fig.add_gridspec(4, 2, hspace=0.3, wspace=0.3)
 
     # Colorblind-safe palette (Wong) with distinct linestyles and markers
     colors = {"full": "#332288", "input": "#E69F00", "output": "#009E73"}
@@ -466,6 +539,66 @@ def plot_distance_curves(
     if ylim is not None:
         ax6.set_ylim(ylim[2], ylim[3])
 
+    # Plot 7: KL Divergence (mean ± std) - log scale
+    ax7 = fig.add_subplot(gs[3, 0])
+    for seq_type in ["input", "output"]:
+        means, stds, _, _, _ = metrics["kl_divergence"][seq_type]
+        if means is not None:
+            label = f"{seq_type.capitalize()}"
+            if seq_type == "input":
+                label += f" (n={num_input_tokens})"
+            else:
+                label += f" (n={num_output_tokens})"
+
+            ax7.plot(loop_steps_transitions, means, label=label, color=colors[seq_type], marker=markers[seq_type], linestyle=linestyles[seq_type], markersize=4)
+            ax7.fill_between(
+                loop_steps_transitions,
+                np.maximum(means - stds, 1e-8),
+                means + stds,
+                alpha=0.2,
+                color=colors[seq_type],
+            )
+
+    ax7.set_xlabel("Loop Step", fontsize=11)
+    ax7.set_ylabel("KL Divergence (mean ± std)", fontsize=11)
+    ax7.set_title(
+        f"KL(p_{{i+1}} || p_i): Mean ± Std (Log Scale)\n(output distribution change per loop{samples_text})",
+        fontsize=12,
+    )
+    ax7.legend(fontsize=9)
+    ax7.grid(True, alpha=0.3)
+    ax7.set_yscale("log")
+
+    # Plot 8: KL Divergence (median + IQR) - log scale
+    ax8 = fig.add_subplot(gs[3, 1])
+    for seq_type in ["input", "output"]:
+        _, _, medians, q25, q75 = metrics["kl_divergence"][seq_type]
+        if medians is not None:
+            label = f"{seq_type.capitalize()}"
+            if seq_type == "input":
+                label += f" (n={num_input_tokens})"
+            else:
+                label += f" (n={num_output_tokens})"
+
+            ax8.plot(loop_steps_transitions, medians, label=label, color=colors[seq_type], marker=markers[seq_type], linestyle=linestyles[seq_type], markersize=4)
+            ax8.fill_between(
+                loop_steps_transitions,
+                np.maximum(q25, 1e-8),
+                q75,
+                alpha=0.2,
+                color=colors[seq_type],
+            )
+
+    ax8.set_xlabel("Loop Step", fontsize=11)
+    ax8.set_ylabel("KL Divergence (median, IQR)", fontsize=11)
+    ax8.set_title(
+        "KL(p_{i+1} || p_i): Median + IQR (Log Scale)\n(more robust to outliers)",
+        fontsize=12,
+    )
+    ax8.legend(fontsize=9)
+    ax8.grid(True, alpha=0.3)
+    ax8.set_yscale("log")
+
     # Save to plots directory
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -554,7 +687,7 @@ def main():
 
         # Generate with latent state tracking
         with autocast_ctx:
-            generated_tokens, input_latent_states, output_latent_states = generate_with_latent_tracking(
+            generated_tokens, input_latent_states, output_latent_states, intermediate_logits = generate_with_latent_tracking(
                 engine=engine,
                 tokenizer=tokenizer,
                 prompt_tokens=prompt_tokens,
@@ -565,6 +698,7 @@ def main():
                 seed=args.seed + sample_offset,  # Different seed per sample
                 kv_budget=args.kv_budget,
                 use_warm_start=args.use_rec_warm_start,
+                return_intermediate_logits=True,
             )
 
         # Combine input and output latent states
@@ -580,6 +714,12 @@ def main():
         # Compute distance metrics for this sample
         if latent_states_per_token:
             metrics = compute_distance_metrics(latent_states_per_token, num_recur, num_input_tokens)
+
+            # Compute KL divergence from intermediate logits (captured during generation)
+            print("Computing KL divergence of output distributions per loop step...")
+            kl_metrics = compute_output_kl_divergence(intermediate_logits, num_input_tokens)
+            metrics["kl_divergence"] = kl_metrics
+
             all_metrics.append(metrics)
         else:
             print(f"Warning: No latent states captured for sample {sample_idx}")

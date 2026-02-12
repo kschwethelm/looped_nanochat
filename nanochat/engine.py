@@ -231,6 +231,7 @@ class Engine:
         num_recur=None,
         use_warm_start=False,
         kv_budget: int = 1,
+        return_intermediate_logits: bool = False,
     ):
         """
         Generate tokens with KV caching and optional batch sampling.
@@ -240,6 +241,8 @@ class Engine:
                 At iteration i, reads/writes cache entry i mod kv_budget.
                 Budget=1 caches only final recurrence (memory efficient).
                 Budget=num_recur caches all recurrences (allows attention across all loop states).
+            return_intermediate_logits: When True, stores intermediate logits (per recurrence
+                step) on self._prefill_intermediate and self._decode_intermediates.
         """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         assert kv_budget >= 1, f"kv_budget must be >= 1, got {kv_budget}"
@@ -284,7 +287,13 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
+        if return_intermediate_logits:
+            logits, warm_start_state, self._prefill_intermediate = self.model.forward(
+                ids, kv_cache=kv_cache_prefill, num_recur=num_recur, return_intermediate_logits=True,
+            )
+            self._decode_intermediates = []
+        else:
+            logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
         warm_start_state = warm_start_state[:, -1:, :].expand(num_samples, -1, -1)  # (num_samples, 1, hidden_dim)
 
@@ -357,12 +366,22 @@ class Engine:
 
             # Prepare logits for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-            logits, warm_start_state = self.model.forward(
-                ids,
-                kv_cache=kv_cache_decode,
-                num_recur=num_recur,
-                warm_start_state=warm_start_state if use_warm_start else None,
-            )
+            if return_intermediate_logits:
+                logits, warm_start_state, decode_intermediate = self.model.forward(
+                    ids,
+                    kv_cache=kv_cache_decode,
+                    num_recur=num_recur,
+                    warm_start_state=warm_start_state if use_warm_start else None,
+                    return_intermediate_logits=True,
+                )
+                self._decode_intermediates.append(decode_intermediate)
+            else:
+                logits, warm_start_state = self.model.forward(
+                    ids,
+                    kv_cache=kv_cache_decode,
+                    num_recur=num_recur,
+                    warm_start_state=warm_start_state if use_warm_start else None,
+                )
             logits = logits[:, -1, :]  # (B, vocab_size)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):

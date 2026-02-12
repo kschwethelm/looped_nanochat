@@ -32,22 +32,38 @@ class LatentStateHook:
 def generate_with_latent_tracking(
     engine: Engine,
     tokenizer,
-    prompt_tokens,
-    num_recur,
-    max_tokens=512,
-    temperature=0.7,
-    top_k=50,
-    seed=42,
-    kv_budget=1,
-    use_warm_start=False,
-) -> tuple[list[int], list[list[torch.Tensor]], list[list[torch.Tensor]]]:
+    prompt_tokens: list[int],
+    num_recur: int,
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+    top_k: int = 50,
+    seed: int = 42,
+    kv_budget: int = 1,
+    use_warm_start: bool = False,
+    return_intermediate_logits: bool = False,
+) -> tuple[list[int], list[list[torch.Tensor]], list[list[torch.Tensor]], list[torch.Tensor] | None]:
     """
     Generate response while tracking latent states for ALL tokens (input + output).
+
+    Delegates generation to engine.generate(), using a hook on recur[-1] to capture
+    latent states. When return_intermediate_logits=True, engine.generate() also captures
+    intermediate logits (per recurrence step) on the engine instance.
+
+    The generator protocol enables correct hook state transitions: prefill runs before
+    the first yield (is_prefill=True), and we flip to is_prefill=False before the
+    generator resumes with the first decode forward.
+
+    Args:
+        return_intermediate_logits: When True, also returns logits at each
+            recurrence step for every token (input + output). The hook on recur[-1]
+            is unaffected because _predict runs coda + lm_head (not recur blocks).
 
     Returns:
         generated_tokens: list of generated token ids
         input_latent_states: list of lists, each containing num_recur tensors for input tokens
         output_latent_states: list of lists, each containing num_recur tensors for output tokens
+        intermediate_logits: list of num_recur tensors, each (total_tokens, vocab_size) on CPU,
+            or None if return_intermediate_logits is False
     """
     hook = LatentStateHook()
 
@@ -56,59 +72,16 @@ def generate_with_latent_tracking(
     handle = last_recur_block.register_forward_hook(hook)
 
     try:
-        device = engine.model.get_device()
         num_input_tokens = len(prompt_tokens)
-
-        # Step 1: Run prefill to capture input token states
-        m = engine.model.config
-        cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
-        effective_num_layers = m.n_prelude + (m.n_recur_block * kv_budget) + m.n_coda
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-
-        from nanochat.engine import KVCache
-
-        kv_model_kwargs = {
-            "num_heads": m.n_kv_head,
-            "head_dim": m.n_embd // m.n_head,
-            "num_layers": effective_num_layers,
-        }
-        kv_cache_prefill = KVCache(
-            batch_size=1,
-            seq_len=len(prompt_tokens),
-            device=device,
-            dtype=dtype,
-            num_recur=cache_num_recur,
-            kv_budget=kv_budget,
-            **kv_model_kwargs,
-        )
-
-        # Run prefill with hook in prefill mode
-        hook.is_prefill = True
-        ids = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
-        logits, warm_start_state = engine.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
-
-        # Extract per-token states from prefill
-        input_latent_states = []
-        if len(hook.prefill_states) >= num_recur:
-            # Take the last num_recur states (in case of extra calls)
-            prefill_recur_states = hook.prefill_states[-num_recur:]
-            # For each token position, collect its states across all recurrences
-            for token_idx in range(num_input_tokens):
-                token_states = [state[:, token_idx, :] for state in prefill_recur_states]
-                input_latent_states.append(token_states)
-
-        # Step 2: Switch to decode mode and run generation
-        hook.is_prefill = False
-        hook.states = []  # Reset decode states
-
-        generated_tokens = []
-        output_latent_states = []
         assistant_end = tokenizer.encode_special("<|assistant_end|>")
         bos = tokenizer.get_bos_token_id()
 
+        hook.is_prefill = True
+        generated_tokens = []
+        output_latent_states = []
         states_before_token = 0
 
-        for token_column, _token_masks in engine.generate(
+        gen = engine.generate(
             prompt_tokens,
             num_samples=1,
             max_tokens=max_tokens,
@@ -116,28 +89,72 @@ def generate_with_latent_tracking(
             top_k=top_k,
             seed=seed,
             num_recur=num_recur,
-            kv_budget=kv_budget,
             use_warm_start=use_warm_start,
-        ):
-            token = token_column[0]  # batch size is 1
+            kv_budget=kv_budget,
+            return_intermediate_logits=return_intermediate_logits,
+        )
 
-            # Stop if we hit a terminal token
+        for is_first, (token_column, _token_masks) in _enumerate_first(gen):
+            if is_first:
+                # Prefill forward has completed (runs before first yield).
+                # Switch hook to decode mode before generator resumes with decode forward.
+                hook.is_prefill = False
+
+            # Capture latent states from the previous decode forward.
+            # On the first yield no decode forward has run yet, so skip.
+            if not is_first:
+                states_after_token = len(hook.states)
+                new_states = hook.states[states_before_token:states_after_token]
+                if len(new_states) >= num_recur:
+                    output_latent_states.append(new_states[-num_recur:])
+                states_before_token = states_after_token
+
+            token = token_column[0]  # num_samples=1
             if token in (assistant_end, bos):
                 break
-
             generated_tokens.append(token)
 
-            # Capture latent states for this token
-            states_after_token = len(hook.states)
-            new_states = hook.states[states_before_token:states_after_token]
+        # After the for loop, capture states from the last decode forward.
+        # In the max_tokens case the generator ran the last decode forward before
+        # its while-loop break (StopIteration). In the assistant_end case we broke
+        # before the generator resumed, so no new states exist here.
+        states_after_token = len(hook.states)
+        new_states = hook.states[states_before_token:states_after_token]
+        if len(new_states) >= num_recur:
+            output_latent_states.append(new_states[-num_recur:])
 
-            # Store all num_recur states for this token
-            if len(new_states) >= num_recur:
-                output_latent_states.append(new_states[-num_recur:])
+        # Extract per-token latent states from prefill
+        input_latent_states = []
+        if len(hook.prefill_states) >= num_recur:
+            prefill_recur_states = hook.prefill_states[-num_recur:]
+            for token_idx in range(num_input_tokens):
+                token_states = [state[:, token_idx, :] for state in prefill_recur_states]
+                input_latent_states.append(token_states)
 
-            states_before_token = states_after_token
+        # Assemble intermediate logits from engine
+        if return_intermediate_logits:
+            prefill_intermediate = engine._prefill_intermediate
+            # Build per-step chunks starting with prefill
+            per_step_chunks: list[list[torch.Tensor]] = [
+                [il[0].cpu()] for il in prefill_intermediate  # (T_input, vocab_size) each
+            ]
+            # Append decode chunks
+            for decode_inter in engine._decode_intermediates:
+                for step_idx, il in enumerate(decode_inter):
+                    per_step_chunks[step_idx].append(il[0].cpu())  # (1, vocab_size)
+            intermediate_logits = [torch.cat(chunks, dim=0) for chunks in per_step_chunks]
+        else:
+            intermediate_logits = None
 
     finally:
         handle.remove()
 
-    return generated_tokens, input_latent_states, output_latent_states
+    return generated_tokens, input_latent_states, output_latent_states, intermediate_logits
+
+
+def _enumerate_first(iterable):
+    """Yield (is_first, item) pairs, where is_first is True only for the first item."""
+    first = True
+    for item in iterable:
+        yield first, item
+        first = False

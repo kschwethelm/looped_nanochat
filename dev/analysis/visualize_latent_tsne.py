@@ -85,7 +85,7 @@ def collect_latent_records(
         print(f"  Prompt length: {len(prompt_tokens)} tokens")
 
         with autocast_ctx:
-            generated_tokens, input_latent_states, output_latent_states = generate_with_latent_tracking(
+            generated_tokens, input_latent_states, output_latent_states, _ = generate_with_latent_tracking(
                 engine=engine,
                 tokenizer=tokenizer,
                 prompt_tokens=prompt_tokens,

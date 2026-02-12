@@ -622,6 +622,37 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
+    def _predict(self, s, cos_sin, kv_cache=None, kv_budget=None):
+        """
+        Run coda blocks + norm_final + lm_head to produce logits from recurrent state.
+
+        This is the final prediction stage: coda attention → final norm → lm_head → softcap.
+        Coda KV cache entries are written in-place, so calling this multiple times with the
+        same kv_cache (before advance()) simply overwrites the same positions — safe for
+        collecting intermediate predictions at each recurrence step.
+
+        Args:
+            s: Recurrent state after norm_recur, shape (B, T, n_embd)
+            cos_sin: Rotary embedding tuple for current positions
+            kv_cache: Optional KV cache (entries overwritten in-place)
+            kv_budget: KV budget (needed for layer index computation)
+
+        Returns:
+            logits: (B, T, vocab_size) in float32, with logit softcap applied
+        """
+        x = s
+        for i, block in enumerate(self.transformer.coda):
+            layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
+            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
+        x = self.norm_final(x)
+
+        softcap = self.config.logit_softcap
+        logits = self.lm_head(x)  # (B, T, padded_vocab_size)
+        logits = logits[..., : self.config.vocab_size]  # slice to remove padding
+        logits = logits.float()  # fp32 for softcap and loss computation
+        logits = softcap * torch.tanh(logits / softcap)
+        return logits
+
     def forward(
         self,
         idx,
@@ -630,6 +661,7 @@ class GPT(nn.Module):
         loss_reduction="mean",
         num_recur=None,
         warm_start_state=None,
+        return_intermediate_logits: bool = False,
     ):
         B, T = idx.size()
         if num_recur is None:
@@ -660,6 +692,10 @@ class GPT(nn.Module):
 
         # 3. Initialize state variable
         s = None
+        # Collect intermediate logits when requested.
+        # Coda KV cache entries are overwritten in-place at the same positions (before advance()),
+        # so the final recurrence leaves the correct cache state.
+        intermediate_logits = [] if return_intermediate_logits else None
 
         # 4. Recurrent block (run num_recur times)
         for i in range(num_recur):
@@ -675,23 +711,17 @@ class GPT(nn.Module):
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
 
-        # 5. Coda blocks (run once)
-        x = s
-        for i, block in enumerate(self.transformer.coda):
-            layer_idx = self._get_kv_layer_idx("coda", i, kv_budget)
-            x = block(x, cos_sin, self.window_sizes[self.config.n_prelude + self.config.n_recur_block + i], kv_cache, layer_idx)
-        x = self.norm_final(x)
+            if return_intermediate_logits:
+                intermediate_logits.append(self._predict(s, cos_sin, kv_cache, kv_budget))
+
+        # 5. Coda + norm_final + lm_head → logits (final prediction)
+        # When collecting intermediate logits, the last entry is already the final prediction
+        # (and the coda KV cache already has the correct final entries from that call).
+        logits = intermediate_logits[-1] if return_intermediate_logits else self._predict(s, cos_sin, kv_cache, kv_budget)
 
         # Advance KV cache position after all layers are done
         if kv_cache is not None:
             kv_cache.advance(T)
-
-        # Forward the lm_head (compute logits)
-        softcap = self.config.logit_softcap
-        logits = self.lm_head(x)  # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
-        logits = logits[..., : self.config.vocab_size]  # slice to remove padding
-        logits = logits.float()  # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap)  # squash the logits
 
         if targets is not None:
             # training: given the targets, compute and return the loss
@@ -702,5 +732,7 @@ class GPT(nn.Module):
                 reduction=loss_reduction,
             )
             return loss
+        elif return_intermediate_logits:
+            return logits, s, intermediate_logits
         else:
-            return logits, s  # Return logits and final state
+            return logits, s
