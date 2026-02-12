@@ -54,6 +54,7 @@ def plot_latent_state_distances(
     task_name: str = "GSM8K",
     kv_budget: int = 1,
     use_warm_start: bool = False,
+    model_tag: str | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
 ):
@@ -190,11 +191,12 @@ def plot_latent_state_distances(
     # Save to plots directory
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
+    model_tag_suffix = f"_{model_tag}" if model_tag else ""
     warmstart_suffix = "_warmstart" if use_warm_start else ""
     task_slug = task_name.lower().replace("-", "_")
     output_path = (
         plots_dir
-        / f"{task_slug}_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
+        / f"{task_slug}{model_tag_suffix}_latent_state_distances_recur{num_recur}_kvbudget{kv_budget}{warmstart_suffix}.png"
     )
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nPlot saved to: {output_path}")
@@ -288,6 +290,7 @@ def main():
             task_name=args.task_name,
             kv_budget=args.kv_budget,
             use_warm_start=args.use_rec_warm_start,
+            model_tag=args.model_tag,
             vmin=args.vmin,
             vmax=args.vmax,
         )

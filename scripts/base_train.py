@@ -31,9 +31,11 @@ from nanochat.common import (
     compute_gradient_stats,
     compute_init,
     get_base_dir,
+    get_num_recur_for_microstep,
     get_peak_flops,
     print0,
     print_banner,
+    sample_num_recurs_for_step,
     sample_poisson_lognormal_recurrence,
 )
 from nanochat.dataloader import (
@@ -84,7 +86,12 @@ parser.add_argument(
     choices=["inject_init_prelude", "inject_init_random", "passthrough"],
     help="input injection mode: inject_init_prelude (default), inject_init_random, or passthrough (no injection)",
 )
-parser.add_argument("--no-sample-recur", action="store_true", help="disable sampling num_recur; use fixed train_recur_mean instead")
+parser.add_argument(
+    "--recur-samples-per-step",
+    type=int,
+    default=8,
+    help="Number of different num_recur values per gradient accumulation step (0 = fixed, use model default)",
+)
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -235,7 +242,7 @@ if resuming:
 orig_model = (
     model  # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
 )
-model = torch.compile(model, dynamic=not args.no_sample_recur)
+model = torch.compile(model, dynamic=bool(args.recur_samples_per_step))
 
 # Detailed parameter counts
 param_counts = orig_model.num_scaling_params()
@@ -310,6 +317,24 @@ grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Tokens / micro-batch (all ranks): {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+
+# Validate recur-samples-per-step (global across all ranks)
+if args.recur_samples_per_step:
+    total_micro_steps = ddp_world_size * grad_accum_steps
+    if args.recur_samples_per_step > total_micro_steps:
+        raise ValueError(
+            f"--recur-samples-per-step ({args.recur_samples_per_step}) cannot exceed total micro-steps ({total_micro_steps} = {ddp_world_size} ranks * {grad_accum_steps} steps). "
+            f"Decrease --recur-samples-per-step or --device-batch-size."
+        )
+    if total_micro_steps % args.recur_samples_per_step != 0:
+        raise ValueError(
+            f"Total micro-steps ({total_micro_steps} = {ddp_world_size} ranks * {grad_accum_steps} steps) must be evenly divisible by --recur-samples-per-step ({args.recur_samples_per_step}). "
+            f"Adjust --device-batch-size to change grad_accum_steps."
+        )
+    microsteps_per_sample = total_micro_steps // args.recur_samples_per_step
+    print0(f"Recurrence sampling: {args.recur_samples_per_step} global samples per step ({microsteps_per_sample} microsteps each across {ddp_world_size} ranks)")
+else:
+    print0(f"Recurrence sampling: fixed (using model default)")
 
 # 3) Learning rate scaling: η ∝ √(B/B_ref) (sqrt scaling for AdamW, assumed for Muon too)
 batch_lr_scale = 1.0
@@ -514,23 +539,28 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+
+    # Pre-sample all num_recur values for this step (global across all ranks)
+    sampled_num_recurs = sample_num_recurs_for_step(
+        recur_samples_per_step=args.recur_samples_per_step,
+        mean_recur=model_config.train_recur_mean,
+        sigma=0.5,
+        max_recur=model_config.train_recur_max,
+        ddp=ddp,
+        master_process=master_process,
+        device=device,
+    )
+
     for _micro_step in range(grad_accum_steps):
-        # Sample number of recurrences from Poisson log-normal distribution (per Geiping et al. (2025) Section 3.3)
-        # If --no-sample-recur is set, pass None to let the model use its default (train_recur_mean)
-        # NOTE: Sampling happens per micro-batch (inside gradient accumulation loop), and each GPU samples
-        # independently. This creates training diversity (e.g., 2 GPUs × 4 grad_accum_steps = 8 different
-        # recursion depths per optimizer step), at the cost of potential load imbalance when GPUs sample
-        # very different num_recur values. The amount of diversity depends on grad_accum_steps, which is
-        # determined by device_batch_size - a potential downside as recursion diversity becomes coupled
-        # to batch size choices.
-        if args.no_sample_recur:
-            num_recur = None
-        else:
-            num_recur = sample_poisson_lognormal_recurrence(
-                mean_recur=model_config.train_recur_mean,
-                sigma=0.5,
-                max_recur=model_config.train_recur_max,
-            )
+        # Get num_recur for this micro-step
+        num_recur = get_num_recur_for_microstep(
+            sampled_num_recurs=sampled_num_recurs,
+            micro_step=_micro_step,
+            ddp_rank=ddp_rank,
+            ddp_world_size=ddp_world_size,
+            grad_accum_steps=grad_accum_steps,
+            recur_samples_per_step=args.recur_samples_per_step,
+        )
         with autocast_ctx:
             loss = model(x, y, num_recur=num_recur)
         train_loss = loss.detach()  # for logging
@@ -588,8 +618,11 @@ while True:
         f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time / 60:.2f}m{eta_str}"
     )
     if step % 100 == 0:
-        # For logging: use actual num_recur if sampled, otherwise the fixed default
-        logged_num_recur = num_recur if num_recur is not None else int(model_config.train_recur_mean)
+        # For logging: report num_recur info
+        if sampled_num_recurs is None:
+            logged_num_recur = int(model_config.train_recur_mean)
+        else:
+            logged_num_recur = sum(sampled_num_recurs) / len(sampled_num_recurs)
         log_data = {
             "step": step,
             "total_training_flops": flops_so_far,

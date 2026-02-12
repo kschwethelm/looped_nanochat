@@ -178,6 +178,7 @@ def plot_tsne(
     kv_budget: int,
     use_warm_start: bool,
     perplexity: float,
+    model_tag: str | None = None,
 ):
     """Plot t-SNE embedding colored by loop step and shaped by token type."""
     fig, ax = plt.subplots(figsize=(12, 10))
@@ -236,9 +237,10 @@ def plot_tsne(
     # Save
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
+    model_tag_suffix = f"_{model_tag}" if model_tag else ""
     warmstart_suffix = "_warmstart" if use_warm_start else ""
     task_slug = task_name.lower().replace("-", "_")
-    output_path = plots_dir / f"{task_slug}_latent_tsne_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
+    output_path = plots_dir / f"{task_slug}{model_tag_suffix}_latent_tsne_recur{num_recur}_samples{num_samples}{warmstart_suffix}.png"
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nt-SNE plot saved to: {output_path}")
     plt.close()
@@ -334,6 +336,7 @@ def main():
         kv_budget=args.kv_budget,
         use_warm_start=args.use_rec_warm_start,
         perplexity=args.perplexity,
+        model_tag=args.model_tag,
     )
 
 

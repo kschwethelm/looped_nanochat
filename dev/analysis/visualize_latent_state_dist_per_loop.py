@@ -317,6 +317,7 @@ def plot_distance_curves(
     task_name: str = "GSM8K",
     kv_budget: int = 1,
     use_warm_start: bool = False,
+    model_tag: str | None = None,
     num_samples: int = 1,
     ylim: tuple[float, float, float, float] | None = None,
     log_scale_l2: bool = False,
@@ -602,13 +603,14 @@ def plot_distance_curves(
     # Save to plots directory
     plots_dir = Path(get_base_dir()) / "plots"
     plots_dir.mkdir(exist_ok=True)
+    model_tag_suffix = f"_{model_tag}" if model_tag else ""
     warmstart_suffix = "_warmstart" if use_warm_start else ""
     samples_suffix = f"_avg{num_samples}" if num_samples > 1 else ""
     logscale_suffix = "_logscale" if log_scale_l2 else ""
     task_slug = task_name.lower().replace("-", "_")
     output_path = (
         plots_dir
-        / f"{task_slug}_latent_distances_per_loop_recur{num_recur}_kvbudget{kv_budget}{samples_suffix}{warmstart_suffix}{logscale_suffix}.png"
+        / f"{task_slug}{model_tag_suffix}_latent_distances_per_loop_recur{num_recur}_kvbudget{kv_budget}{samples_suffix}{warmstart_suffix}{logscale_suffix}.png"
     )
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"\nComprehensive plot saved to: {output_path}")
@@ -633,7 +635,7 @@ def main():
     )
     parser.add_argument(
         "--ylim",
-        default=[200.0, 4000.0, 0.825, 1.01],
+        default=None,
         type=float,
         nargs=4,
         metavar=("L2_YMIN", "L2_YMAX", "COS_YMIN", "COS_YMAX"),
@@ -747,6 +749,7 @@ def main():
             task_name=args.task_name,
             kv_budget=args.kv_budget,
             use_warm_start=args.use_rec_warm_start,
+            model_tag=args.model_tag,
             num_samples=args.num_samples,
             ylim=ylim,
             log_scale_l2=args.log_scale_l2,
