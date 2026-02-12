@@ -6,6 +6,57 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
+## 2026-02-12: Recursion Depth Sweep at Scale — Some Positive Signal
+
+Repeated the 2026-02-11 depth sweep at S20 (1280 width, 328M params, 1.35e19 FLOPs) — a scale where models produce coherent text. Same setup: num_recur ∈ {2, 4, 6}, fixed recurrence, default hyperparameters, 2× A100-SXM4-80GB.
+
+### Base Model
+
+| Model | r | FLOPs/tok | Tokens | Val BPB | Steps | Time |
+|-------|---|-----------|--------|---------|-------|------|
+| r2_1.35e19_s20 | 2 | 2.24e9 | 6.02B | **0.8266** | 11486 | 9:43h |
+| r4_1.35e19_s20 | 4 | 3.38e9 | 3.99B | 0.8333 | 7613 | 9:56h |
+| r6_1.35e19_s20 | 6 | 4.52e9 | 2.98B | 0.8437 | 5693 | 8:18h |
+
+Same pattern as S12: val BPB degrades monotonically with r. The gap narrowed (0.017 r2-vs-r6 vs 0.022 at S12) but the direction is unchanged.
+
+### SFT + ChatCORE
+
+All base models SFT'd for 1 epoch (816 steps) with fixed recurrence at their respective r. Categorical tasks (ARC, MMLU) are identical under full vs minimal KV cache. Generative tasks differ — shown as kv=r / kv=1 below.
+
+| Model | SFT Val BPB | ARC-E | ARC-C | MMLU | SpellingBee (r/1) | GSM8K (r/1) | HumanEval (r/1) | ChatCORE (r/1) |
+|-------|-------------|-------|-------|------|-------------------|-------------|-----------------|----------------|
+| r2 | 0.4027 | **0.453** | **0.361** | 0.337 | 0.957 / 0.922 | 0.021 / 0.024 | 0.006 / 0.000 | 0.2531 / 0.2468 |
+| r4 | **0.4017** | 0.468 | 0.355 | **0.338** | **0.973** / 0.961 | 0.031 / **0.041** | 0.055 / **0.079** | **0.2677** / **0.2715** |
+| r6 | 0.4078 | 0.444 | 0.325 | 0.338 | 0.973 / **0.969** | 0.031 / 0.036 | **0.061** / 0.049 | 0.2567 / 0.2549 |
+
+SFT compresses the gap — all within ~0.006 BPB. ChatCORE spreads more than at S12 (0.2531–0.2677 vs 0.2248–0.2289), with r4 ahead overall. Notable trend: generative benchmarks now favor higher r. HumanEval climbs with depth (0.006 → 0.055 → 0.061), GSM8K jumps from r2 to r4/r6. Categorical tasks don't show this. Absolute scores are still low, but this is a possible early signal that depth helps multi-step generation more than pattern matching.
+
+Minimal KV cache barely changes performance — r4 even improves marginally (0.2677 → 0.2715), surprising given models were trained with full cache.
+
+### Latent State Dynamics
+
+Visualized latent convergence (L2 distance, cosine similarity, KL divergence between consecutive loop steps) on GSM8K & SpellingBee prompts at r=16 under full cache (kv=16) and minimal cache (kv=1).
+
+**Convergence speed = training r.** Each model reaches its fixed point in approximately the number of loops it was trained with — r2 in ~2, r4 in ~4, r6 in ~6 — then near-identity. Same spread-computation pattern as S12.
+
+**kv=1 smooths convergence.** With full cache, r4 and r6 show non-monotonic spikes during convergence. With kv=1, both converge faster and more smoothly. kv=1 only caches the last loop's KV entries from the previous token (the converged state), so attention sees a consistent "preview" of the fixed point across all loops, guiding early loops toward convergence faster. Full cache exposes unconverged intermediate states that can disrupt the trajectory.
+
+**Fixed-step training causes convergence spikes.** The non-monotonic spikes in r4/r6 are absent in models trained with recurrence sampling (2026-02-09 variants). Fixed-step training learns a specific iteration trajectory that can overshoot before settling; sampled training learns a smoother monotonic path. Another argument for recurrence sampling — not for final performance (equivalent, see 2026-02-09), but for cleaner convergence dynamics, especially relevant for early-exit gating.
+
+### Interpretation
+
+The spread-computation pattern from S12 persists: more recursions don't clearly improve the fixed point, and r4 wins ChatCORE despite r6 having 50% more effective depth. But the picture is less one-sided than at S12. The base BPB gap narrowed, and generative benchmarks now favor higher r while categorical tasks remain flat. This could be early evidence that depth becomes more useful once models have enough capacity for multi-step generation, even if the signal is weak.
+
+**Note: gradient truncation.** All models use bptt_k=4, which covers all iterations for r=2 and r=4 but truncates gradients for the first 2 iterations of r=6. r=6's weaker base BPB may partly reflect this rather than a fundamental depth limitation.
+
+### Next Steps
+- Train S20 r=1 (non-looped) and S20 r=4 & r=6 with sampled recursions
+- Evaluation on synthetic arithmetic tasks
+- Training-free early exiting
+
+---
+
 ## 2026-02-11: Naive Recursion Depth Sweep — Diminishing Returns
 
 Swept num_recur ∈ {2, 4, 6} at fixed IsoFLOPs (2.15e18) on S12 (768 width, 158M physical params). Architecture identical across runs (2 prelude, 4 recur block layers, 2 coda) — only the loop count changes. Fixed recurrence (no sampling), default hyperparameters.
@@ -16,9 +67,9 @@ Under a fixed FLOPs budget, more recursions means more FLOPs per token and propo
 
 | Model | r | FLOPs/tok | Tokens | Val BPB | Steps | Time |
 |-------|---|-----------|--------|---------|-------|------|
-| r2_2.15e18_s12 | 2 | 9.96e8 | 2.16B | **0.9060** | 4118 | 112m |
-| r4_2.15e18_s12 | 4 | 1.44e9 | 1.49B | 0.9144 | 2839 | 110m |
-| r6_2.15e18_s12 | 6 | 1.89e9 | 1.14B | 0.9281 | 2167 | 92m |
+| r2_2.15e18_s12 | 2 | 9.96e8 | 2.16B | **0.9060** | 4118 | 1:52h |
+| r4_2.15e18_s12 | 4 | 1.44e9 | 1.49B | 0.9144 | 2839 | 1:50h |
+| r6_2.15e18_s12 | 6 | 1.89e9 | 1.14B | 0.9281 | 2167 | 1:32h |
 
 Val BPB degrades monotonically with r. The extra depth doesn't compensate for seeing fewer tokens — r2 wins by seeing nearly 2× the data of r6.
 
