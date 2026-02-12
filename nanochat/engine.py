@@ -180,6 +180,18 @@ class KVCache:
         self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
         self.cache_seqlens.fill_(other_pos)
 
+    def prefill_row(self, other, row_idx: int):
+        """
+        Copy a batch=1 KV cache into a specific row of this batch KV cache.
+        Used for multi-prompt batched generation where each prompt is prefilled separately.
+        """
+        assert other.batch_size == 1, "Source cache must be batch_size=1"
+        assert self.n_layers == other.n_layers and self.n_heads == other.n_heads and self.head_dim == other.head_dim
+        other_pos = other.get_pos()
+        self.k_cache[:, row_idx, :other_pos, :, :] = other.k_cache[:, 0, :other_pos, :, :]
+        self.v_cache[:, row_idx, :other_pos, :, :] = other.v_cache[:, 0, :other_pos, :, :]
+        self.cache_seqlens[row_idx] = other_pos
+
 
 # -----------------------------------------------------------------------------
 @torch.inference_mode()
@@ -383,6 +395,167 @@ class Engine:
                     warm_start_state=warm_start_state if use_warm_start else None,
                 )
             logits = logits[:, -1, :]  # (B, vocab_size)
+
+    @torch.inference_mode()
+    def generate_multi(
+        self,
+        token_sequences: list[list[int]],
+        max_tokens: int | None = None,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        seed: int = 42,
+        num_recur: int | None = None,
+        use_warm_start: bool = False,
+        kv_budget: int = 1,
+    ):
+        """
+        Generate one completion for each of multiple different prompts in parallel.
+        Sequential prefill (one prompt at a time) then batched autoregressive decode.
+
+        Yields (token_column, token_masks) where each has length = len(token_sequences).
+        """
+        batch_size = len(token_sequences)
+        assert batch_size > 0
+        assert all(isinstance(ts, list) and isinstance(ts[0], int) for ts in token_sequences)
+        device = self.model.get_device()
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        rng = torch.Generator(device=device)
+        rng.manual_seed(seed)
+
+        # Special tokens for tool use state machine
+        python_start = self.tokenizer.encode_special("<|python_start|>")
+        python_end = self.tokenizer.encode_special("<|python_end|>")
+        output_start = self.tokenizer.encode_special("<|output_start|>")
+        output_end = self.tokenizer.encode_special("<|output_end|>")
+        assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        bos = self.tokenizer.get_bos_token_id()
+
+        # Model config for KV cache sizing
+        m = self.model.config
+        cache_num_recur = num_recur if num_recur is not None else int(m.train_recur_mean)
+        effective_num_layers = m.n_prelude + (m.n_recur_block * kv_budget) + m.n_coda
+        kv_model_kwargs = {
+            "num_heads": m.n_kv_head,
+            "head_dim": m.n_embd // m.n_head,
+            "num_layers": effective_num_layers,
+        }
+
+        # 1) Sequential prefill: process each prompt individually, copy KV into shared decode cache
+        max_prompt_len = max(len(ts) for ts in token_sequences)
+        kv_length_hint = (max_prompt_len + max_tokens) if max_tokens is not None else m.sequence_len
+
+        # Shared decode KV cache for all prompts
+        kv_cache_decode = KVCache(
+            batch_size=batch_size,
+            seq_len=kv_length_hint,
+            device=device,
+            dtype=dtype,
+            num_recur=cache_num_recur,
+            kv_budget=kv_budget,
+            **kv_model_kwargs,
+        )
+
+        # Reusable batch=1 prefill cache (sized for longest prompt)
+        kv_cache_prefill = KVCache(
+            batch_size=1,
+            seq_len=max_prompt_len,
+            device=device,
+            dtype=dtype,
+            num_recur=cache_num_recur,
+            kv_budget=kv_budget,
+            **kv_model_kwargs,
+        )
+
+        # Collect per-prompt logits and warm_start_states
+        all_logits = []
+        all_warm_states = []
+
+        for i, tokens in enumerate(token_sequences):
+            kv_cache_prefill.reset()
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            logits, warm_start_state = self.model.forward(ids, kv_cache=kv_cache_prefill, num_recur=num_recur)
+            all_logits.append(logits[:, -1, :])  # (1, vocab_size)
+            all_warm_states.append(warm_start_state[:, -1:, :])  # (1, 1, hidden_dim)
+            kv_cache_decode.prefill_row(kv_cache_prefill, i)
+
+        del kv_cache_prefill
+        logits = torch.cat(all_logits, dim=0)  # (B, vocab_size)
+        warm_start_state = torch.cat(all_warm_states, dim=0)  # (B, 1, hidden_dim)
+
+        # 2) Initialize per-row state
+        row_states = [RowState(ts.copy()) for ts in token_sequences]
+
+        # 3) Batched autoregressive decode
+        num_generated = 0
+        while True:
+            if max_tokens is not None and num_generated >= max_tokens:
+                break
+            if all(state.completed for state in row_states):
+                break
+
+            next_ids = sample_next_token(logits, rng, temperature, top_k)
+            sampled_tokens = next_ids[:, 0].tolist()
+
+            token_column = []
+            token_masks = []
+            for i, state in enumerate(row_states):
+                is_forced = len(state.forced_tokens) > 0
+                token_masks.append(0 if is_forced else 1)
+                next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
+                token_column.append(next_token)
+                state.current_tokens.append(next_token)
+                if next_token in (assistant_end, bos):
+                    state.completed = True
+                if next_token == python_start:
+                    state.in_python_block = True
+                    state.python_expr_tokens = []
+                elif next_token == python_end and state.in_python_block:
+                    state.in_python_block = False
+                    if state.python_expr_tokens:
+                        expr = self.tokenizer.decode(state.python_expr_tokens)
+                        result = use_calculator(expr)
+                        if result is not None:
+                            result_tokens = self.tokenizer.encode(str(result))
+                            state.forced_tokens.append(output_start)
+                            state.forced_tokens.extend(result_tokens)
+                            state.forced_tokens.append(output_end)
+                    state.python_expr_tokens = []
+                elif state.in_python_block:
+                    state.python_expr_tokens.append(next_token)
+
+            yield token_column, token_masks
+            num_generated += 1
+
+            ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
+            logits, warm_start_state = self.model.forward(
+                ids,
+                kv_cache=kv_cache_decode,
+                num_recur=num_recur,
+                warm_start_state=warm_start_state if use_warm_start else None,
+            )
+            logits = logits[:, -1, :]
+
+    def generate_batch_multi(self, token_sequences: list[list[int]], **kwargs):
+        """
+        Non-streaming multi-prompt batch generation. Returns one completion per prompt.
+        Returns (results, masks) where each is a list of token sequences.
+        """
+        assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        bos = self.tokenizer.get_bos_token_id()
+        results = [ts.copy() for ts in token_sequences]
+        masks = [[0] * len(ts) for ts in token_sequences]
+        completed = [False] * len(token_sequences)
+        for token_column, token_masks in self.generate_multi(token_sequences, **kwargs):
+            for i, (token, mask) in enumerate(zip(token_column, token_masks)):
+                if not completed[i]:
+                    if token in (assistant_end, bos):
+                        completed[i] = True
+                    else:
+                        results[i].append(token)
+                        masks[i].append(mask)
+            if all(completed):
+                break
+        return results, masks
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):
         """
