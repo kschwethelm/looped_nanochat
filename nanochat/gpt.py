@@ -662,6 +662,7 @@ class GPT(nn.Module):
         num_recur=None,
         warm_start_state=None,
         return_intermediate_logits: bool = False,
+        return_intermediate_states: bool = False,
     ):
         B, T = idx.size()
         if num_recur is None:
@@ -706,6 +707,7 @@ class GPT(nn.Module):
         # Coda KV cache entries are overwritten in-place at the same positions (before advance()),
         # so the final recurrence leaves the correct cache state.
         intermediate_logits = [] if return_intermediate_logits else None
+        intermediate_states = [] if return_intermediate_states else None
 
         # 4. Recurrent block (run num_recur times)
         for i in range(num_recur):
@@ -721,6 +723,8 @@ class GPT(nn.Module):
             if self.config.bptt_k is not None and i < num_recur - self.config.bptt_k:
                 s = s.detach()
 
+            if return_intermediate_states:
+                intermediate_states.append(s)
             if return_intermediate_logits:
                 intermediate_logits.append(self._predict(s, cos_sin, kv_cache, kv_budget))
 
@@ -742,6 +746,8 @@ class GPT(nn.Module):
                 reduction=loss_reduction,
             )
             return loss
+        elif return_intermediate_states:
+            return logits, s, intermediate_logits, intermediate_states
         elif return_intermediate_logits:
             return logits, s, intermediate_logits
         else:
