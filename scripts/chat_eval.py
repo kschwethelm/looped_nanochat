@@ -9,6 +9,7 @@ torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
 """
 
 import argparse
+import os
 from contextlib import nullcontext
 from functools import partial
 
@@ -20,6 +21,7 @@ from nanochat.common import (
     autodetect_device_type,
     compute_cleanup,
     compute_init,
+    get_base_dir,
     get_dist_info,
     print0,
 )
@@ -351,12 +353,44 @@ if __name__ == "__main__":
     }
     task_names = all_tasks if args.task_name is None else args.task_name.split("|")
 
-    # Run all the task evaluations for each num_recur value
-    from nanochat.report import get_report
+    # Summary CSV: one row per (num_recur, kv_budget) with per-task accuracies + ChatCORE
+    base_dir = get_base_dir()
+    eval_dir = os.path.join(base_dir, "chat_eval")
+    os.makedirs(eval_dir, exist_ok=True)
+    base_slug = f"{args.source}_{args.model_tag}_step{meta['step']:06d}"
+    summary_csv_path = os.path.join(eval_dir, f"{base_slug}.csv")
 
-    all_results = {}
+    def read_completed_rows(csv_path: str) -> set[str]:
+        """Read CSV and return set of 'num_recur,kv_budget' keys already present."""
+        if not os.path.exists(csv_path):
+            return set()
+        completed = set()
+        with open(csv_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#") or line.startswith("num_recur"):
+                    continue
+                parts = line.split(",", 2)
+                if len(parts) >= 2:
+                    completed.add(f"{parts[0].strip()},{parts[1].strip()}")
+        return completed
+
+    completed_rows = read_completed_rows(summary_csv_path)
+
+    # Write comment header with hyperparameters (once, when creating the file)
+    if ddp_rank == 0 and not os.path.exists(summary_csv_path):
+        with open(summary_csv_path, "w", encoding="utf-8", newline="") as f:
+            f.write(f"# source={args.source}, model_tag={args.model_tag}, step={meta['step']}"
+                    f", temperature={args.temperature}, top_k={args.top_k}"
+                    f", num_samples={args.num_samples}, max_new_tokens={args.max_new_tokens}"
+                    f", warm_start={args.use_rec_warm_start}, dtype={args.dtype}"
+                    f", tasks={';'.join(task_names)}\n")
+
     for num_recur, kv_budget in zip(recur_values, kv_budgets):
-        recur_label = f"r{num_recur}" if num_recur is not None else "default"
+        row_key = f"{num_recur},{kv_budget}"
+        if row_key in completed_rows:
+            print0(f"\nSkipping num_recur={num_recur}, kv_budget={kv_budget} (already in CSV)")
+            continue
+
         print0(f"\n{'=' * 80}")
         print0(f"Evaluating with num_recur={num_recur if num_recur is not None else 'default'}, kv_budget={kv_budget}")
         print0(f"{'=' * 80}")
@@ -383,11 +417,7 @@ if __name__ == "__main__":
                 results[task_name] = acc
                 print0(f"{task_name} accuracy: {100 * acc:.2f}%")
 
-        all_results[recur_label] = results
-
-        # calculate the ChatCORE metric (similar to CORE, it's the mean centered accuracy)
-        # this way, ChatCORE ranges from 0 (at random baseline) to 1 (peak performance)
-        # missing tasks are assumed to have 0 accuracy (baseline performance)
+        # Calculate ChatCORE metric (mean centered accuracy across all tasks)
         missing_tasks = [t for t in all_tasks if t not in results]
         full_results = {t: results.get(t, 0.0) for t in all_tasks}
         centered_mean = 0
@@ -396,29 +426,29 @@ if __name__ == "__main__":
             centered_acc = (acc - baseline_acc) / (1.0 - baseline_acc)
             centered_mean += centered_acc
         chatcore_metric = centered_mean / len(all_tasks)
-        partial_hint = ""
         if missing_tasks:
-            partial_hint = " (partial: missing tasks assumed 0)"
             print0(f"  Note: {', '.join(missing_tasks)} not tested, assumed 0 for ChatCORE")
-        chatcore_metric_dict = {"ChatCORE metric": chatcore_metric}
-        print0(f"ChatCORE metric ({recur_label}): {chatcore_metric:.4f}{partial_hint}")
+        print0(f"ChatCORE metric: {chatcore_metric:.4f}")
 
-        # Log to report for this recur value
-        section_name = f"Chat evaluation {args.source}"
-        if args.model_tag is not None:
-            section_name += f" {args.model_tag}"
-        if num_recur is not None:
-            section_name += f" (r={num_recur})"
-        not_tested_dict = {t: "Not tested (assumed 0 for ChatCORE)" for t in missing_tasks}
-        get_report().log(
-            section=section_name,
-            data=[
-                vars(args),
-                {"num_recur_here": num_recur, "kv_budget_here": kv_budget},
-                results,
-                not_tested_dict,
-                chatcore_metric_dict,
-            ],
-        )
+        # Append summary row to CSV
+        if ddp_rank == 0:
+            columns = ["num_recur", "kv_budget"]
+            values = [str(num_recur), str(kv_budget)]
+            for task in task_names:
+                columns.append(task)
+                values.append(f"{results.get(task, 0.0):.6f}")
+            columns.append("ChatCORE")
+            values.append(f"{chatcore_metric:.6f}")
+
+            # Write header row if this is the first data row
+            file_size = os.path.getsize(summary_csv_path) if os.path.exists(summary_csv_path) else 0
+            write_header = file_size == 0 or all(
+                line.startswith("#") for line in open(summary_csv_path, encoding="utf-8") if line.strip()
+            )
+            with open(summary_csv_path, "a", encoding="utf-8", newline="") as f:
+                if write_header:
+                    f.write(",".join(columns) + "\n")
+                f.write(",".join(values) + "\n")
+            print0(f"Summary appended to: {summary_csv_path}")
 
     compute_cleanup()

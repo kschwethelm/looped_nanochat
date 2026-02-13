@@ -190,7 +190,7 @@ def main():
     parser.add_argument("--device-batch-size", type=int, default=32, help="Per-device batch size for BPB evaluation")
     parser.add_argument("--split-tokens", type=int, default=40 * 524288, help="Number of tokens to evaluate per split for BPB")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
-    parser.add_argument("--num-recur", type=int, default=None, help="Number of recurrent iterations (default = model's train_recur_mean)")
+    parser.add_argument("--num-recur", type=str, default=None, help="Comma-separated recurrence depths to evaluate, e.g. '2,4,6' (default = model's train_recur_mean)")
     parser.add_argument("--debug", type=int, default=0, help="Print this many debug examples per arithmetic task (0 = off)")
     args = parser.parse_args()
 
@@ -212,171 +212,192 @@ def main():
         model, tokenizer = load_hf_model(args.hf_path, device)
         sequence_len = model.max_seq_len or 1024
         token_bytes = get_hf_token_bytes(tokenizer, device=device)
-        model_name = args.hf_path
-        model_slug = args.hf_path.replace("/", "-")
     else:
         model, tokenizer, meta = load_model("base", device, phase="eval", model_tag=args.model_tag, step=args.step)
         sequence_len = meta["model_config"]["sequence_len"]
         token_bytes = get_token_bytes(device=device)
 
-        # Determine effective num_recur for naming
-        effective_num_recur = args.num_recur if args.num_recur is not None else meta["train_config"].get("train_recur_mean")
+    # Parse num_recur into a list of values to sweep
+    if args.num_recur is not None:
+        num_recur_values = [int(x) for x in args.num_recur.split(",")]
+    elif is_hf_model:
+        num_recur_values = [None]
+    else:
+        num_recur_values = [meta["train_config"].get("train_recur_mean")]
 
-        # Build model name and slug that includes model_tag, step, and num_recur
-        model_name = f"{args.model_tag} (step {meta['step']}, num_recur={effective_num_recur})"
-        model_slug = f"{args.model_tag}_step{meta['step']:06d}_recur{effective_num_recur}"
-
-    print0(f"Evaluating model: {model_name}")
     print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
+    print0(f"Recursion depths to evaluate: {num_recur_values}")
 
-    # Results to log
-    core_results = None
-    arithmetic_results = None
-    bpb_results = {}
-    samples = []
-    unconditioned_samples = []
+    # Base slug for combined CSV output (without recur suffix)
+    if is_hf_model:
+        base_slug = args.hf_path.replace("/", "-")
+    else:
+        base_slug = f"{args.model_tag}_step{meta['step']:06d}"
 
-    # --- CORE evaluation ---
-    if "core" in eval_modes:
-        print0("\n" + "=" * 80)
-        print0("CORE Evaluation")
-        print0("=" * 80)
-        with autocast_ctx:
-            core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task, num_recur=args.num_recur)
+    # Summary CSV: one row per num_recur with aggregate metrics
+    base_dir = get_base_dir()
+    eval_dir = os.path.join(base_dir, "base_eval")
+    os.makedirs(eval_dir, exist_ok=True)
+    summary_csv_path = os.path.join(eval_dir, f"{base_slug}.csv")
 
-        # Write CSV output
-        if ddp_rank == 0:
-            base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
-            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-            with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
-                f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered':<10}\n")
-                for label in core_results["results"]:
-                    acc = core_results["results"][label]
-                    centered = core_results["centered_results"][label]
-                    f.write(f"{label:<35}, {acc:<10.6f}, {centered:<10.6f}\n")
-                f.write(f"{'CORE':<35}, {'':<10}, {core_results['core_metric']:<10.6f}\n")
-            print0(f"\nResults written to: {output_csv_path}")
+    def read_completed_recur(csv_path: str) -> set[str]:
+        """Read a CSV and return the set of num_recur values already present."""
+        if not os.path.exists(csv_path):
+            return set()
+        completed = set()
+        with open(csv_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#") or line.startswith("num_recur"):
+                    continue
+                parts = line.split(",", 1)
+                if parts:
+                    completed.add(parts[0].strip())
+        return completed
+
+    completed_recur = read_completed_recur(summary_csv_path)
+
+    # Write comment header with hyperparameters (once, when creating the file)
+    if ddp_rank == 0 and not os.path.exists(summary_csv_path):
+        model_id = args.hf_path if is_hf_model else f"{args.model_tag}_step{meta['step']}"
+        with open(summary_csv_path, "w", encoding="utf-8", newline="") as f:
+            f.write(f"# model={model_id}, eval={args.eval}"
+                    f", device_batch_size={args.device_batch_size}"
+                    f", split_tokens={args.split_tokens}"
+                    f", max_per_task={args.max_per_task}\n")
+
+    for num_recur in num_recur_values:
+        nr_str = str(num_recur)
+
+        if nr_str in completed_recur:
+            print0(f"\nSkipping num_recur={num_recur} (already in CSV)")
+            continue
+
+        # Build model name for this recursion depth
+        if is_hf_model:
+            model_name = args.hf_path
+        else:
+            model_name = f"{args.model_tag} (step {meta['step']}, num_recur={num_recur})"
+
+        print0(f"\n{'#' * 80}")
+        print0(f"Evaluating model: {model_name}")
+        print0(f"{'#' * 80}")
+
+        # Results to log
+        core_results = None
+        arithmetic_results = None
+        bpb_results = {}
+
+        # --- CORE evaluation ---
+        if "core" in eval_modes:
+            print0("\n" + "=" * 80)
+            print0("CORE Evaluation")
+            print0("=" * 80)
+            with autocast_ctx:
+                core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task, num_recur=num_recur)
             print0(f"CORE metric: {core_results['core_metric']:.4f}")
 
-    # --- Arithmetic evaluation ---
-    if "arithmetic" in eval_modes:
-        print0("\n" + "=" * 80)
-        print0("Arithmetic Evaluation")
-        print0("=" * 80)
-        arith_num_examples = args.max_per_task if args.max_per_task > 0 else 500
-        with autocast_ctx:
-            arithmetic_results = evaluate_arithmetic(
-                model, tokenizer, device,
-                num_examples=arith_num_examples,
-                batch_size=args.device_batch_size,
-                num_recur=args.num_recur,
-                debug=args.debug,
-            )
-
-        # Write CSV output
-        if ddp_rank == 0:
-            base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}_arithmetic.csv")
-            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-            with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
-                f.write(f"{'Task':<35}, {'Accuracy':<10}\n")
-                for label, acc in arithmetic_results.items():
-                    f.write(f"{label:<35}, {acc:<10.6f}\n")
-            print0(f"\nResults written to: {output_csv_path}")
-
-    # --- BPB evaluation ---
-    if "bpb" in eval_modes:
-        print0("\n" + "=" * 80)
-        print0("BPB Evaluation")
-        print0("=" * 80)
-        tokens_per_step = args.device_batch_size * sequence_len * ddp_world_size
-        if args.split_tokens % tokens_per_step != 0:
-            # Adjust to nearest multiple
-            args.split_tokens = (args.split_tokens // tokens_per_step) * tokens_per_step
-            print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
-        steps = args.split_tokens // tokens_per_step
-
-        for split_name in ["train", "val"]:
-            loader = tokenizing_distributed_data_loader_bos_bestfit(
-                tokenizer, args.device_batch_size, sequence_len, split_name, device=device
-            )
+        # --- Arithmetic evaluation ---
+        if "arithmetic" in eval_modes:
+            print0("\n" + "=" * 80)
+            print0("Arithmetic Evaluation")
+            print0("=" * 80)
+            arith_num_examples = args.max_per_task if args.max_per_task > 0 else 500
             with autocast_ctx:
-                bpb = evaluate_bpb(model, loader, steps, token_bytes, num_recur=args.num_recur)
-            bpb_results[split_name] = bpb
-            print0(f"{split_name} bpb: {bpb:.6f}")
+                arithmetic_results = evaluate_arithmetic(
+                    model, tokenizer, device,
+                    num_examples=arith_num_examples,
+                    batch_size=args.device_batch_size,
+                    num_recur=num_recur,
+                    debug=args.debug,
+                )
 
-        # Write BPB results to CSV
-        if ddp_rank == 0 and bpb_results:
-            base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}_bpb.csv")
-            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
-            with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
-                f.write("Split,BPB\n")
-                for split_name, bpb in sorted(bpb_results.items()):
-                    f.write(f"{split_name},{bpb:.6f}\n")
-            print0(f"\nBPB results written to: {output_csv_path}")
+        # --- BPB evaluation ---
+        if "bpb" in eval_modes:
+            print0("\n" + "=" * 80)
+            print0("BPB Evaluation")
+            print0("=" * 80)
+            tokens_per_step = args.device_batch_size * sequence_len * ddp_world_size
+            if args.split_tokens % tokens_per_step != 0:
+                args.split_tokens = (args.split_tokens // tokens_per_step) * tokens_per_step
+                print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
+            steps = args.split_tokens // tokens_per_step
 
-    # --- Sampling ---
-    if "sample" in eval_modes and not is_hf_model:
-        print0("\n" + "=" * 80)
-        print0("Model Samples")
-        print0("=" * 80)
-        if ddp_rank == 0:
-            prompts = [
-                "The capital of France is",
-                "The chemical symbol of gold is",
-                "If yesterday was Friday, then tomorrow will be",
-                "The opposite of hot is",
-                "The planets of the solar system are:",
-                "My favorite color is",
-                "If 5*x + 3 = 13, then x is",
-            ]
-            engine = Engine(model, tokenizer)
-            print0("\nConditioned samples:")
-            for prompt in prompts:
-                tokens = tokenizer(prompt, prepend="<|bos|>")
+            for split_name in ["train", "val"]:
+                loader = tokenizing_distributed_data_loader_bos_bestfit(
+                    tokenizer, args.device_batch_size, sequence_len, split_name, device=device
+                )
                 with autocast_ctx:
-                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0, num_recur=args.num_recur)
-                sample_str = tokenizer.decode(sample[0])
-                print0("-" * 80)
-                print0(sample_str)
-                samples.append(sample_str)
+                    bpb = evaluate_bpb(model, loader, steps, token_bytes, num_recur=num_recur)
+                bpb_results[split_name] = bpb
+                print0(f"{split_name} bpb: {bpb:.6f}")
 
-            print0("\nUnconditioned samples:")
-            tokens = tokenizer("", prepend="<|bos|>")
-            with autocast_ctx:
-                uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0, num_recur=args.num_recur)
-            for sample in uncond:
-                sample_str = tokenizer.decode(sample)
-                print0("-" * 80)
-                print0(sample_str)
-                unconditioned_samples.append(sample_str)
-    elif "sample" in eval_modes and is_hf_model:
-        print0("\nSkipping sampling for HuggingFace models (not supported)")
+        # --- Append summary row to CSV ---
+        if ddp_rank == 0:
+            # Build header and row dynamically based on what was evaluated
+            columns = ["num_recur"]
+            values = [nr_str]
+            if core_results:
+                columns.append("core_metric")
+                values.append(f"{core_results['core_metric']:.6f}")
+                for label in core_results["centered_results"]:
+                    columns.append(label)
+                    values.append(f"{core_results['centered_results'][label]:.6f}")
+            if arithmetic_results:
+                for label, acc in arithmetic_results.items():
+                    columns.append(label)
+                    values.append(f"{acc:.6f}")
+            if bpb_results:
+                columns.append("train_bpb")
+                values.append(f"{bpb_results['train']:.6f}")
+                columns.append("val_bpb")
+                values.append(f"{bpb_results['val']:.6f}")
 
-    # --- Log to report ---
-    from nanochat.report import get_report
+            # Write header row if this is the first data row
+            file_size = os.path.getsize(summary_csv_path) if os.path.exists(summary_csv_path) else 0
+            write_header = file_size == 0 or all(
+                line.startswith("#") for line in open(summary_csv_path, encoding="utf-8") if line.strip()
+            )
+            with open(summary_csv_path, "a", encoding="utf-8", newline="") as f:
+                if write_header:
+                    f.write(",".join(columns) + "\n")
+                f.write(",".join(values) + "\n")
+            print0(f"\nSummary appended to: {summary_csv_path}")
 
-    report_data = [{"model": model_name}]
+        # --- Sampling ---
+        if "sample" in eval_modes and not is_hf_model:
+            print0("\n" + "=" * 80)
+            print0("Model Samples")
+            print0("=" * 80)
+            if ddp_rank == 0:
+                prompts = [
+                    "The capital of France is",
+                    "The chemical symbol of gold is",
+                    "If yesterday was Friday, then tomorrow will be",
+                    "The opposite of hot is",
+                    "The planets of the solar system are:",
+                    "My favorite color is",
+                    "If 5*x + 3 = 13, then x is",
+                ]
+                engine = Engine(model, tokenizer)
+                print0("\nConditioned samples:")
+                for prompt in prompts:
+                    tokens = tokenizer(prompt, prepend="<|bos|>")
+                    with autocast_ctx:
+                        sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0, num_recur=num_recur)
+                    sample_str = tokenizer.decode(sample[0])
+                    print0("-" * 80)
+                    print0(sample_str)
 
-    if core_results:
-        report_data[0]["CORE metric"] = core_results["core_metric"]
-        report_data.append(core_results["centered_results"])
-
-    if arithmetic_results:
-        report_data.append(arithmetic_results)
-
-    if bpb_results:
-        report_data[0]["train bpb"] = bpb_results.get("train")
-        report_data[0]["val bpb"] = bpb_results.get("val")
-
-    if samples:
-        report_data.append({f"sample {i}": s for i, s in enumerate(samples)})
-    if unconditioned_samples:
-        report_data.append({f"unconditioned {i}": s for i, s in enumerate(unconditioned_samples)})
-
-    get_report().log(section="Base model evaluation", data=report_data)
+                print0("\nUnconditioned samples:")
+                tokens = tokenizer("", prepend="<|bos|>")
+                with autocast_ctx:
+                    uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0, num_recur=num_recur)
+                for sample in uncond:
+                    sample_str = tokenizer.decode(sample)
+                    print0("-" * 80)
+                    print0(sample_str)
+        elif "sample" in eval_modes and is_hf_model:
+            print0("\nSkipping sampling for HuggingFace models (not supported)")
 
     compute_cleanup()
 
