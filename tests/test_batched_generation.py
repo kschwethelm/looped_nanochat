@@ -1,5 +1,5 @@
 """
-Tests for batched generative evaluation (generate_multi / generate_batch_multi).
+Tests for batched generative evaluation (generate_multi).
 Core property: batched generation must produce identical results to sequential
 generation at temperature=0.
 
@@ -154,7 +154,7 @@ def test_prefill_row_different_lengths():
 
 def test_batched_matches_sequential_temperature_zero():
     """
-    Core correctness test: generate_batch_multi with temperature=0 must produce
+    Core correctness test: generate_multi with temperature=0 must produce
     identical results to calling generate_batch sequentially for each prompt.
     """
     engine = _make_engine()
@@ -174,7 +174,7 @@ def test_batched_matches_sequential_temperature_zero():
         sequential_results.append(results[0])
 
     # Batched: all prompts at once
-    batched_results, _ = engine.generate_batch_multi(prompts, **gen_kwargs)
+    batched_results, _ = engine.generate_multi(prompts, **gen_kwargs)
 
     for i, (seq, bat) in enumerate(zip(sequential_results, batched_results)):
         assert seq == bat, (
@@ -198,7 +198,7 @@ def test_batched_matches_sequential_various_lengths():
         results, _ = engine.generate_batch(prompt, num_samples=1, **gen_kwargs)
         sequential_results.append(results[0])
 
-    batched_results, _ = engine.generate_batch_multi(prompts, **gen_kwargs)
+    batched_results, _ = engine.generate_multi(prompts, **gen_kwargs)
 
     for i, (seq, bat) in enumerate(zip(sequential_results, batched_results)):
         assert seq == bat, f"Mismatch at prompt {i}"
@@ -211,7 +211,7 @@ def test_batched_single_prompt_matches_sequential():
     gen_kwargs = dict(max_tokens=15, temperature=0.0, seed=42)
 
     seq_results, seq_masks = engine.generate_batch(prompt, num_samples=1, **gen_kwargs)
-    bat_results, bat_masks = engine.generate_batch_multi([prompt], **gen_kwargs)
+    bat_results, bat_masks = engine.generate_multi([prompt], **gen_kwargs)
 
     assert seq_results[0] == bat_results[0]
     assert seq_masks[0] == bat_masks[0]
@@ -221,13 +221,13 @@ def test_batched_single_prompt_matches_sequential():
 # Structural tests
 
 
-def test_generate_batch_multi_max_tokens():
+def test_generate_multi_max_tokens():
     """Batched generation respects max_tokens."""
     engine = _make_engine()
     prompts = [[261, 10], [261, 20, 30]]
 
     for max_tokens in [1, 5, 20]:
-        results, _ = engine.generate_batch_multi(prompts, max_tokens=max_tokens, temperature=0.0)
+        results, _ = engine.generate_multi(prompts, max_tokens=max_tokens, temperature=0.0)
         for i, result in enumerate(results):
             prompt_len = len(prompts[i])
             generated = len(result) - prompt_len
@@ -236,21 +236,21 @@ def test_generate_batch_multi_max_tokens():
             )
 
 
-def test_generate_batch_multi_result_count():
+def test_generate_multi_result_count():
     """Returns exactly one result per prompt."""
     engine = _make_engine()
     for n in [1, 2, 4, 8]:
         prompts = [[261, i] for i in range(n)]
-        results, masks = engine.generate_batch_multi(prompts, max_tokens=5, temperature=0.0)
+        results, masks = engine.generate_multi(prompts, max_tokens=5, temperature=0.0)
         assert len(results) == n
         assert len(masks) == n
 
 
-def test_generate_batch_multi_preserves_prompt_prefix():
+def test_generate_multi_preserves_prompt_prefix():
     """Each result starts with its original prompt tokens."""
     engine = _make_engine()
     prompts = [[261, 10, 20], [261, 100, 200, 50]]
-    results, _ = engine.generate_batch_multi(prompts, max_tokens=10, temperature=0.0)
+    results, _ = engine.generate_multi(prompts, max_tokens=10, temperature=0.0)
 
     for prompt, result in zip(prompts, results):
         assert result[:len(prompt)] == prompt, (
@@ -273,7 +273,7 @@ def test_early_completion_one_prompt():
     # Prompt B: ends with 10, generates 11, 12, 13, ... for many tokens
     prompt_b = [261, 10]
 
-    results, _ = engine.generate_batch_multi(
+    results, _ = engine.generate_multi(
         [prompt_a, prompt_b], max_tokens=20, temperature=0.0,
     )
 
@@ -299,7 +299,7 @@ def test_early_completion_matches_sequential():
         results, _ = engine.generate_batch(prompt, num_samples=1, **gen_kwargs)
         sequential_results.append(results[0])
 
-    batched_results, _ = engine.generate_batch_multi(prompts, **gen_kwargs)
+    batched_results, _ = engine.generate_multi(prompts, **gen_kwargs)
 
     for i, (seq, bat) in enumerate(zip(sequential_results, batched_results)):
         assert seq == bat, f"Mismatch at prompt {i} (early completion test)"

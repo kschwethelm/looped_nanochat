@@ -70,7 +70,7 @@ def run_generative_eval(
             encoded_prompts = [tokenizer.render_for_completion(conv) for conv in conversations]
 
             # Batched generation: one completion per prompt
-            results, _ = engine.generate_batch_multi(
+            results, _ = engine.generate_multi(
                 encoded_prompts,
                 max_tokens=max_new_tokens,
                 temperature=temperature,
