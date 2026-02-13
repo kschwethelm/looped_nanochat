@@ -34,6 +34,7 @@ from contextlib import nullcontext
 import torch
 import yaml
 
+from nanochat.arithmetic_eval import evaluate_arithmetic
 from nanochat.checkpoint_manager import load_model
 from nanochat.common import autodetect_device_type, compute_cleanup, compute_init, download_file_with_lock, get_base_dir, print0
 from nanochat.core_eval import evaluate_task
@@ -180,7 +181,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1, num_recur=None):
 def main():
     parser = argparse.ArgumentParser(description="Base model evaluation")
     parser.add_argument(
-        "--eval", type=str, default="core,bpb,sample", help="Comma-separated evaluations to run: core,bpb,sample (default: all)"
+        "--eval", type=str, default="core,bpb,sample", help="Comma-separated evaluations to run: core,bpb,sample,arithmetic (default: core,bpb,sample)"
     )
     parser.add_argument("--hf-path", type=str, default=None, help="HuggingFace model path (e.g. openai-community/gpt2)")
     parser.add_argument("--model-tag", type=str, default=None, help="nanochat model tag to identify the checkpoint directory")
@@ -190,11 +191,12 @@ def main():
     parser.add_argument("--split-tokens", type=int, default=40 * 524288, help="Number of tokens to evaluate per split for BPB")
     parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
     parser.add_argument("--num-recur", type=int, default=None, help="Number of recurrent iterations (default = model's train_recur_mean)")
+    parser.add_argument("--debug", type=int, default=0, help="Print this many debug examples per arithmetic task (0 = off)")
     args = parser.parse_args()
 
     # Parse evaluation modes
     eval_modes = set(mode.strip() for mode in args.eval.split(","))
-    valid_modes = {"core", "bpb", "sample"}
+    valid_modes = {"core", "bpb", "sample", "arithmetic"}
     invalid = eval_modes - valid_modes
     if invalid:
         parser.error(f"Invalid eval modes: {invalid}. Valid: {valid_modes}")
@@ -229,6 +231,7 @@ def main():
 
     # Results to log
     core_results = None
+    arithmetic_results = None
     bpb_results = {}
     samples = []
     unconditioned_samples = []
@@ -255,6 +258,32 @@ def main():
                 f.write(f"{'CORE':<35}, {'':<10}, {core_results['core_metric']:<10.6f}\n")
             print0(f"\nResults written to: {output_csv_path}")
             print0(f"CORE metric: {core_results['core_metric']:.4f}")
+
+    # --- Arithmetic evaluation ---
+    if "arithmetic" in eval_modes:
+        print0("\n" + "=" * 80)
+        print0("Arithmetic Evaluation")
+        print0("=" * 80)
+        arith_num_examples = args.max_per_task if args.max_per_task > 0 else 500
+        with autocast_ctx:
+            arithmetic_results = evaluate_arithmetic(
+                model, tokenizer, device,
+                num_examples=arith_num_examples,
+                batch_size=args.device_batch_size,
+                num_recur=args.num_recur,
+                debug=args.debug,
+            )
+
+        # Write CSV output
+        if ddp_rank == 0:
+            base_dir = get_base_dir()
+            output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}_arithmetic.csv")
+            os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+            with open(output_csv_path, "w", encoding="utf-8", newline="") as f:
+                f.write(f"{'Task':<35}, {'Accuracy':<10}\n")
+                for label, acc in arithmetic_results.items():
+                    f.write(f"{label:<35}, {acc:<10.6f}\n")
+            print0(f"\nResults written to: {output_csv_path}")
 
     # --- BPB evaluation ---
     if "bpb" in eval_modes:
@@ -334,6 +363,9 @@ def main():
     if core_results:
         report_data[0]["CORE metric"] = core_results["core_metric"]
         report_data.append(core_results["centered_results"])
+
+    if arithmetic_results:
+        report_data.append(arithmetic_results)
 
     if bpb_results:
         report_data[0]["train bpb"] = bpb_results.get("train")
