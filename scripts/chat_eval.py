@@ -47,47 +47,81 @@ def run_generative_eval(
     num_recur=None,
     use_warm_start=False,
     kv_budget=1,
+    batch_size=1,
 ):
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     device = model.get_device()
 
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
 
-    # Run the evaluation
+    # Indices assigned to this rank
+    rank_indices = list(range(ddp_rank, num_problems, ddp_world_size))
+
+    # Use batched evaluation when num_samples == 1 and batch_size > 1
+    use_batching = num_samples == 1 and batch_size > 1
+
     num_passed, total = 0, 0
-    for i in range(ddp_rank, num_problems, ddp_world_size):
-        conversation = task_object[i]
 
-        # Tokenize the prompt
-        encoded_prompt = tokenizer.render_for_completion(conversation)
-        # Get the completions
-        results, _ = engine.generate_batch(
-            encoded_prompt,
-            num_samples=num_samples,
-            max_tokens=max_new_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            num_recur=num_recur,
-            use_warm_start=use_warm_start,
-            kv_budget=kv_budget,
-        )
-        # Decode the completions as text
-        prefix_length = len(encoded_prompt)
-        completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
-        # Evaluate success criteria
-        outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
-        passed = any(outcomes)
+    if use_batching:
+        # Process problems in batches
+        for batch_start in range(0, len(rank_indices), batch_size):
+            batch_indices = rank_indices[batch_start : batch_start + batch_size]
+            conversations = [task_object[i] for i in batch_indices]
+            encoded_prompts = [tokenizer.render_for_completion(conv) for conv in conversations]
 
-        # Keep stats
-        total += 1
-        num_passed += int(passed)
+            # Batched generation: one completion per prompt
+            results, _ = engine.generate_multi(
+                encoded_prompts,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                num_recur=num_recur,
+                use_warm_start=use_warm_start,
+                kv_budget=kv_budget,
+            )
 
-        # Logging (overwrite the same line in the console)
-        print(
-            f"\r\033[KRank {ddp_rank} | {num_passed}/{total} ({100 * num_passed / total:.2f}%)",
-            end="",
-            flush=True,
-        )
+            # Decode and evaluate each result
+            for idx, (conv, encoded_prompt, result_tokens) in enumerate(
+                zip(conversations, encoded_prompts, results)
+            ):
+                prefix_length = len(encoded_prompt)
+                completion = tokenizer.decode(result_tokens[prefix_length:])
+                passed = task_object.evaluate(conv, completion)
+                total += 1
+                num_passed += int(passed)
+
+            print(
+                f"\r\033[KRank {ddp_rank} | {num_passed}/{total} ({100 * num_passed / total:.2f}%)",
+                end="",
+                flush=True,
+            )
+    else:
+        # Original sequential path (num_samples > 1 or batch_size == 1)
+        for i in rank_indices:
+            conversation = task_object[i]
+            encoded_prompt = tokenizer.render_for_completion(conversation)
+            results, _ = engine.generate_batch(
+                encoded_prompt,
+                num_samples=num_samples,
+                max_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                num_recur=num_recur,
+                use_warm_start=use_warm_start,
+                kv_budget=kv_budget,
+            )
+            prefix_length = len(encoded_prompt)
+            completions = [tokenizer.decode(result_tokens[prefix_length:]) for result_tokens in results]
+            outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
+            passed = any(outcomes)
+            total += 1
+            num_passed += int(passed)
+
+            print(
+                f"\r\033[KRank {ddp_rank} | {num_passed}/{total} ({100 * num_passed / total:.2f}%)",
+                end="",
+                flush=True,
+            )
 
     # Finish the in-place progress line with a newline before final summary
     print()
@@ -199,7 +233,8 @@ def run_chat_eval(
     model,
     tokenizer,
     engine,
-    batch_size=1,
+    cat_batch_size=8,
+    gen_batch_size=4,
     num_samples=1,
     max_new_tokens=512,
     temperature=0.0,
@@ -234,13 +269,14 @@ def run_chat_eval(
             num_recur=num_recur,
             use_warm_start=use_warm_start,
             kv_budget=kv_budget,
+            batch_size=gen_batch_size,
         )
     elif task_object.eval_type == "categorical":
         acc = run_categorical_eval(
             task_object,
             tokenizer,
             model,
-            batch_size,
+            cat_batch_size,
             max_problems=max_problems,
             num_recur=num_recur,
         )
@@ -261,6 +297,7 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--num-samples', type=int, default=1)
     parser.add_argument('-k', '--top-k', type=int, default=50)
     parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
+    parser.add_argument('-bg', '--gen-batch-size', type=int, default=4, help='Batch size for generative evaluation (when num_samples=1). Smaller than -b because decode KV cache is much larger.')
     parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
@@ -332,7 +369,8 @@ if __name__ == "__main__":
                     model,
                     tokenizer,
                     engine,
-                    batch_size=args.batch_size,
+                    cat_batch_size=args.batch_size,
+                    gen_batch_size=args.gen_batch_size,
                     num_samples=args.num_samples,
                     max_new_tokens=args.max_new_tokens,
                     temperature=args.temperature,

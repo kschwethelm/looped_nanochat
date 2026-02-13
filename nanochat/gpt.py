@@ -674,11 +674,21 @@ class GPT(nn.Module):
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = (
-            self.cos[:, T0 : T0 + T],
-            self.sin[:, T0 : T0 + T],
-        )  # truncate cache to current sequence length
+        if kv_cache is not None and T == 1 and not torch.all(kv_cache.cache_seqlens == kv_cache.cache_seqlens[0]):
+            # Per-element rotary positions for batched decode with non-uniform prompt lengths
+            # self.cos is (1, max_seq, 1, hd/2), index with (B,) positions → (B, 1, hd/2) → unsqueeze → (B, 1, 1, hd/2)
+            # This broadcasts correctly with q/k shapes (B, T=1, H, hd)
+            positions = kv_cache.cache_seqlens.long()
+            cos_sin = (
+                self.cos[0, positions].unsqueeze(1),
+                self.sin[0, positions].unsqueeze(1),
+            )
+        else:
+            T0 = 0 if kv_cache is None else kv_cache.get_pos()
+            cos_sin = (
+                self.cos[:, T0 : T0 + T],
+                self.sin[:, T0 : T0 + T],
+            )  # truncate cache to current sequence length
 
         # 1. Embedding + norm
         x = self.transformer.wte(idx)
