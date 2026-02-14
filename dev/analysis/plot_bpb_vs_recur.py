@@ -1,19 +1,39 @@
 """
 Plot validation BPB vs number of recurrences for different models.
 
-Reads BPB CSV files from base_eval directory and creates a comparison plot
-showing how validation loss changes with test-time compute (num_recur).
+Reads summary CSV files from base_eval directory (produced by base_eval.py)
+and creates a comparison plot showing how validation loss changes with
+test-time compute (num_recur).
+
+CSV format (from base_eval.py):
+    # model=..., eval=..., ...
+    num_recur,core_metric,...,train_bpb,val_bpb
+    4,0.123,...,0.85,0.87
 
 Usage:
-    uv run python dev/plot_bpb_vs_recur.py [--step STEP] [--model-tags TAG1 TAG2 ...]
+    uv run python dev/analysis/plot_bpb_vs_recur.py [--step STEP] [--model-tags TAG1 TAG2 ...]
 """
 
 import argparse
+import csv
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
+
+# Source machine_config.sh so NANOCHAT_BASE_DIR is set before get_base_dir()
+_config_path = Path(__file__).resolve().parents[2] / "slurm" / "machine_config.sh"
+if _config_path.exists() and not os.environ.get("NANOCHAT_BASE_DIR"):
+    _out = subprocess.run(
+        ["bash", "-c", f"source {_config_path} && env"],
+        capture_output=True, text=True, check=True,
+    )
+    for line in _out.stdout.splitlines():
+        key, _, val = line.partition("=")
+        if key in ("NANOCHAT_BASE_DIR", "HF_HOME", "HF_DATASETS_CACHE"):
+            os.environ[key] = val
 
 from nanochat.common import get_base_dir
 
@@ -34,50 +54,65 @@ COLORS = [
 MARKERS = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h", "H", "X"]
 
 
-def parse_bpb_csv(csv_path: Path) -> dict[str, float]:
-    """Parse a BPB CSV file and return dict of split -> bpb."""
-    results = {}
-    with open(csv_path, encoding="utf-8") as f:
-        lines = f.readlines()
-        for line in lines[1:]:  # Skip header
-            if line.strip():
-                split_name, bpb = line.strip().split(",")
-                results[split_name] = float(bpb)
-    return results
-
-
-def parse_filename(filename: str) -> tuple[str, int, int] | None:
+def parse_filename(filename: str) -> tuple[str, int] | None:
     """
-    Parse filename to extract model_tag, step, and num_recur.
+    Parse filename to extract model_tag and step.
 
-    Expected format: {model_tag}_step{step:06d}_recur{num_recur}_bpb.csv
-    Returns (model_tag, step, num_recur) or None if parsing fails.
+    Expected format: {model_tag}_step{step:06d}.csv
+    Returns (model_tag, step) or None if parsing fails.
     """
-    # Pattern: anything_step######_recur##_bpb.csv
-    pattern = r"^(.+)_step(\d+)_recur(\d+)_bpb\.csv$"
+    pattern = r"^(.+)_step(\d+)\.csv$"
     match = re.match(pattern, filename)
     if match:
-        model_tag = match.group(1)
-        step = int(match.group(2))
-        num_recur = int(match.group(3))
-        return (model_tag, step, num_recur)
+        return (match.group(1), int(match.group(2)))
     return None
+
+
+def parse_summary_csv(csv_path: Path) -> list[dict[str, float]]:
+    """
+    Parse a base_eval summary CSV file.
+
+    Skips comment lines (starting with #) and reads the header + data rows.
+    Returns list of dicts with at least 'num_recur', 'train_bpb', 'val_bpb'.
+    Rows missing BPB columns are skipped.
+    """
+    rows = []
+    with open(csv_path, encoding="utf-8") as f:
+        # Filter out comment lines before passing to csv reader
+        non_comment_lines = [line for line in f if not line.startswith("#")]
+    if not non_comment_lines:
+        return rows
+
+    reader = csv.DictReader(non_comment_lines)
+    for row in reader:
+        if "val_bpb" not in row or "num_recur" not in row:
+            continue
+        try:
+            parsed = {
+                "num_recur": int(row["num_recur"]) if row["num_recur"] != "None" else 0,
+                "val_bpb": float(row["val_bpb"]),
+                "train_bpb": float(row["train_bpb"]) if "train_bpb" in row else None,
+            }
+            rows.append(parsed)
+        except (ValueError, KeyError):
+            continue
+    return rows
 
 
 def collect_data(base_eval_dir: Path, step_filter: int | None = None, model_tags_filter: list[str] | None = None) -> dict:
     """
-    Collect all BPB results from CSV files.
+    Collect all BPB results from summary CSV files.
 
     Returns dict: {model_tag: {step: {num_recur: {"train": float, "val": float}}}}
     """
-    data = {}
+    data: dict = {}
 
-    for csv_file in base_eval_dir.glob("*_bpb.csv"):
+    for csv_file in base_eval_dir.glob("*.csv"):
         parsed = parse_filename(csv_file.name)
         if parsed is None:
             continue
 
-        model_tag, step, num_recur = parsed
+        model_tag, step = parsed
 
         # Apply filters
         if step_filter is not None and step != step_filter:
@@ -85,17 +120,32 @@ def collect_data(base_eval_dir: Path, step_filter: int | None = None, model_tags
         if model_tags_filter is not None and model_tag not in model_tags_filter:
             continue
 
-        # Parse BPB values
-        bpb_values = parse_bpb_csv(csv_file)
+        # Parse rows from summary CSV
+        rows = parse_summary_csv(csv_file)
+        if not rows:
+            continue
 
-        # Store in nested dict
         if model_tag not in data:
             data[model_tag] = {}
         if step not in data[model_tag]:
             data[model_tag][step] = {}
-        data[model_tag][step][num_recur] = bpb_values
+
+        for row in rows:
+            num_recur = row["num_recur"]
+            bpb_values = {"val": row["val_bpb"]}
+            if row["train_bpb"] is not None:
+                bpb_values["train"] = row["train_bpb"]
+            data[model_tag][step][num_recur] = bpb_values
 
     return data
+
+
+def parse_mean_recur(model_tag: str) -> int | None:
+    """Extract mean training recurrence from model tag prefix (e.g., 'r4_...' -> 4)."""
+    match = re.match(r"^r(\d+)_", model_tag)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def create_short_label(model_tag: str) -> str:
@@ -152,8 +202,13 @@ def plot_bpb_vs_recur(data: dict, output_path: Path):
     # Shaded region for num_recur=2-16
     ax.axvspan(2, 16, alpha=0.15, color="gray", zorder=0, label="sample range")
 
-    # Vertical line mark at num_recur=4
-    ax.axvline(x=4, color="darkred", linestyle="--", linewidth=2, alpha=0.7, zorder=1, label="mean train recur")
+    # Vertical lines for each unique mean training recurrence
+    seen_recur: set[int] = set()
+    for model_tag in data:
+        mean_recur = parse_mean_recur(model_tag)
+        if mean_recur is not None and mean_recur not in seen_recur:
+            seen_recur.add(mean_recur)
+            ax.axvline(x=mean_recur, color="darkred", linestyle="--", linewidth=2, alpha=0.7, zorder=1, label=f"mean train recur={mean_recur}")
 
     # Styling
     ax.set_xlabel("Number of Recurrences", fontsize=12, fontweight="bold")

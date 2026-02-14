@@ -6,6 +6,83 @@ Running log of experiments on the looped (depth-recurrent) transformer, forked f
 
 ---
 
+## 2026-02-13: Sampled Depth Sweep at Scale
+
+Tested recurrence step sampling at S20 (1280 width, 328M params, 1.35e19 FLOPs). Geiping et al. (2025, "Huginn") propose sampling num_recur from a Poisson lognormal distribution during training instead of fixing it, exposing the model to variable recursion depths. This forces the model to produce useful output at any depth in the distribution's support — a prerequisite for adaptive compute at inference. Trained r=4 (mean=4, r_max=16) and r=6 (mean=6, r_max=20) with sampling. Compared against fixed baselines from 2026-02-12. Same compute budget, architecture, 2× A100-SXM4-80GB.
+
+### Base Model — Mean Recursion
+
+| Model | r (eval) | Val BPB | Time |
+|-------|----------|---------|------|
+| r4 (fixed) | 4 | **0.8313** | 9:56h |
+| r4_sample | 4 | 0.8342 | 14:27h |
+| r6 (fixed) | 6 | 0.8437 | 8:18h |
+| r6_sample | 6 | 0.8430 | 12:49h |
+
+At the training mean, sampled and fixed are within noise (~0.003 BPB). Consistent with S12 (2026-02-09): sampling doesn't improve or hurt peak performance.
+
+**Training overhead.** Sampling adds ~46% wall time for r4 and ~55% for r6. Two sources: `torch.compile(dynamic=True)` recompiles when the loop count changes between steps, and the Poisson lognormal tail occasionally hits expensive high-r values (up to r_max). One mitigation: always execute r_max iterations (fixed compile graph) but detach gradients at the sampled depth. This wastes forward FLOPs on extra iterations but eliminates dynamic recompilation entirely. Near the distribution mean, a statically compiled step should outperform a dynamically compiled one — worth benchmarking.
+
+### Base Model — Depth Sweep
+
+Evaluated all models at r ∈ {2, 4, 6, 8, 10, 12, 16} to test behavior outside training distribution.
+
+| r (eval) | r4_fixed | r4_sample | r6_fixed* | r6_sample |
+|----------|----------|-----------|-----------|-----------|
+| 2 | 0.9446 | **0.8448** | 1.2706 | **0.8607** |
+| 4 | **0.8313** | 0.8342 | 0.9136 | **0.8445** |
+| 6 | 0.8509 | **0.8335** | **0.8417** | 0.8430 |
+| 8 | 0.8413 | **0.8334** | 0.8653 | **0.8429** |
+| 10 | 0.8450 | **0.8334** | 0.8570 | **0.8429** |
+| 12 | 0.8441 | **0.8335** | 0.8593 | **0.8429** |
+| 16 | 0.8446 | **0.8335** | 0.8591 | **0.8429** |
+
+**Robustness at low r.** Sampled models degrade gracefully below training depth (r4_sample loses 0.011 BPB at r=2 vs 0.113 for r4_fixed). The gap widens with training r — r6_fixed degrades sharply at r=2 (1.27 BPB) while r6_sample stays at 0.86.
+
+**Flat plateau above r_mean.** Sampled models converge around r_mean and stay flat (r4_sample ~0.834, r6_sample ~0.843). Fixed models oscillate above their optimum. No benefit from extra depth in either case.
+
+### SFT + ChatCORE
+
+All models SFT'd for 1 epoch (816 steps). At mean recursion with kv=1, sampled models score similarly to their fixed counterparts (r4_sample 0.276 vs r4_fixed 0.271, r6_sample 0.263 vs r6_fixed 0.255 — see 2026-02-12 for full comparison).
+
+ChatCORE depth sweep:
+
+| r (eval) | r4_sample | | | | r6_sample | | | |
+|----------|-----------|---|---|---|-----------|---|---|---|
+| | ARC-E | GSM8K | HumanEval | ChatCORE | ARC-E | GSM8K | HumanEval | ChatCORE |
+| 2 | 0.461 | 0.016 | 0.049 | 0.253 | 0.400 | 0.007 | 0.006 | 0.206 |
+| 4 | **0.495** | 0.025 | **0.079** | **0.276** | 0.480 | 0.037 | 0.018 | 0.260 |
+| 6 | 0.495 | 0.030 | 0.067 | 0.275 | 0.479 | 0.036 | 0.018 | 0.263 |
+| 8 | 0.492 | 0.028 | 0.073 | 0.276 | 0.478 | **0.039** | **0.024** | **0.264** |
+| 10 | 0.490 | **0.031** | 0.067 | 0.275 | 0.480 | 0.037 | 0.018 | 0.263 |
+| 12 | — | — | — | — | 0.478 | 0.038 | 0.024 | 0.263 |
+
+Same flat-beyond-mean pattern as the base model. No benefit from extra inference-time depth. r4_sample at r=4 (0.276) still beats r6_sample at r=12 (0.263) — extra training depth doesn't pay for the token reduction under isoFLOP.
+
+### Latent State Convergence
+
+Visualized convergence dynamics (L2 distance, cosine similarity, KL divergence between consecutive loop steps) on GSM8K prompts at r=16 for all four models (sampled/fixed × r4/r6), under full cache (kv=16) and minimal cache (kv=1).
+
+**Sampling produces smoother convergence.** Sampled models show clean monotonic decay across all metrics — L2 drops exponentially, cosine similarity rises to ~0.98+ within the first few iterations, then plateaus. Fixed models show oscillatory, non-monotonic convergence with spikes in KL divergence and relative L2. The effect is most dramatic for r6: fixed r=6 shows persistent oscillations across all 16 loop steps with no clear convergence trend, while r6_sample converges as cleanly as r4_sample.
+
+**r6 converges later than r4 without performance gain.** r6_sample takes more iterations to reach its fixed point than r4_sample, but lands at a worse BPB/ChatCORE. This suggests r6 spreads its computation across more steps without compressing it into useful additional depth — the extra iterations don't buy anything, they just slow convergence down.
+
+### Interpretation
+
+**Sampling is expensive for what it delivers.** ~50% wall-time overhead for no BPB or ChatCORE improvement at the training mean, and no depth scaling beyond it. The convergence dynamics are cleaner, but that alone doesn't justify the cost — especially since performance plateaus at r_mean, meaning we could achieve the same depth-robustness by simply supervising at multiple fixed small depths (intermediate decoding + loss at each depth). That would be cheaper than sampling from a heavy-tailed distribution and fighting `dynamic=True` recompilation.
+
+**Sampling needs to be combined with something else to matter.** On its own it's a robustness technique without a capacity payoff. For adaptive compute to work, the model needs a reason to use extra depth — and vanilla looping doesn't provide one.
+
+### Next Steps
+
+- **Training-free early exit.** Test threshold-based stopping (L2 / cosine between iterations)
+- **Give each recursion a purpose.** Mixture of Recursions (arXiv:2507.10524) or per-depth LoRA adapters — specialize what each loop step does rather than repeating the same block identically. Learned gating is more interesting in combination with such non-vanilla architectures.
+- **Inter-loop communication.** Attending to prior recursions (arXiv:2511.08577) could teach the model where to allocate more compute across depths.
+- **Latent state across tokens.** Carrying hidden state from one token's loop to the next would enable iterative refinement across the sequence, but requires creative training parallelization: parallel loop decoding where tokens loop concurrently and exchange information (arXiv:2510.24824), or Jacobi iteration (arXiv:2509.23184). 
+- **Masked Diffusion Models.** Connection to diffusion models and block decoding is also worth exploring.
+
+---
+
 ## 2026-02-12: Recursion Depth Sweep at Scale — Some Positive Signal
 
 Repeated the 2026-02-11 depth sweep at S20 (1280 width, 328M params, 1.35e19 FLOPs) — a scale where models produce coherent text. Same setup: num_recur ∈ {1, 2, 4, 6}, fixed recurrence, default hyperparameters, 2× A100-SXM4-80GB. r=1 is the non-looped baseline (same architecture, recurrent block executes once).
